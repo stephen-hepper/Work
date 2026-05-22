@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# Virtualenv (uv managed at workspace root)
+.venv/
+
+# IDE
+.idea/
+.vscode/
+
+# EPA / chemtreat_water_leads run artifacts (regenerable from the pipeline)
+EPA/snapshot.sqlite
+EPA/out/
+EPA/cache/
+
+# Bulk-loader cache (large ECHO ZIPs)
+**/echo_exporter.zip
+**/npdes_downloads.zip
+**/SDWA_latest_downloads.zip

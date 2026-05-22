@@ -1,0 +1,1321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ChemTreat Water Lead Viewer</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --border: #e3e6eb;
+    --text: #1d2330;
+    --muted: #6b7385;
+    --accent: #1f5fa8;
+    --accent-soft: #e8f0fb;
+    --warn-bg: #fff6d6;
+    --warn-border: #e2c14a;
+    --warn-text: #6a4d00;
+    --danger: #c0392b;
+    --danger-soft: #fbe6e3;
+    --orange: #d97a1a;
+    --orange-soft: #fdeed7;
+    --yellow: #c79b00;
+    --yellow-soft: #fcf2c0;
+    --gray-soft: #e8eaee;
+    --green: #1f7a4d;
+    --green-soft: #def3e6;
+    --cwa: #1f5fa8;
+    --cwa-soft: #e0ecfb;
+    --sdwa: #117a7a;
+    --sdwa-soft: #d8f0ef;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.45;
+  }
+  button {
+    font-family: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  /* Lag banner */
+  .lag-banner {
+    background: var(--warn-bg);
+    border-bottom: 1px solid var(--warn-border);
+    color: var(--warn-text);
+    padding: 10px 20px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    position: sticky;
+    top: 0;
+    z-index: 50;
+  }
+
+  /* Demo-data banner */
+  .demo-banner {
+    background: #efeaff;
+    border-bottom: 1px solid #c2b3f0;
+    color: #4b2a91;
+    padding: 8px 20px;
+    font-size: 12.5px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    position: sticky;
+    top: 0;
+    z-index: 49;
+  }
+  .demo-banner.hidden { display: none; }
+  .demo-banner .demo-icon {
+    flex: 0 0 22px;
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: #7c5fd6;
+    color: #fff;
+    font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px;
+  }
+  .btn.btn-disabled {
+    background: var(--gray-soft);
+    color: var(--muted);
+    border-color: var(--border);
+    cursor: not-allowed;
+  }
+  .btn.btn-disabled:hover { background: var(--gray-soft); }
+  .lag-banner strong { color: #4d3700; }
+  .lag-icon {
+    flex: 0 0 24px;
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    background: var(--warn-border);
+    color: #fff;
+    font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px;
+  }
+
+  /* Header */
+  .header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .header h1 {
+    font-size: 18px;
+    margin: 0;
+    font-weight: 600;
+  }
+  .header .meta {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  .header-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .btn {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 12px;
+    color: var(--text);
+    transition: background 0.1s;
+  }
+  .btn:hover { background: var(--bg); }
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .btn-primary:hover { background: #174a85; }
+
+  /* Body */
+  .body {
+    padding: 20px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+
+  /* Summary tiles */
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+  .tile {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .tile .label {
+    color: var(--muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .tile .value {
+    font-size: 26px;
+    font-weight: 600;
+    margin-top: 4px;
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+  .tile .value-suffix {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--muted);
+    text-transform: lowercase;
+  }
+  .tile.alert .value { color: var(--danger); }
+  .tile.hot .value { color: var(--orange); }
+  .tile.calm .value { color: var(--green); }
+
+  /* Filter bar */
+  .filters {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 14px;
+    display: grid;
+    grid-template-columns: 1.4fr 1fr 1.4fr 1.8fr 1.2fr;
+    gap: 14px;
+    align-items: end;
+  }
+  .filter-group label {
+    display: block;
+    font-size: 11px;
+    text-transform: uppercase;
+    color: var(--muted);
+    letter-spacing: 0.04em;
+    margin-bottom: 4px;
+    font-weight: 600;
+  }
+  .filter-group select,
+  .filter-group input[type="text"] {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    font-family: inherit;
+    font-size: 13px;
+    background: #fff;
+  }
+  .filter-group select[multiple] { height: 60px; }
+  .slider-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .slider-row input[type="range"] { flex: 1; }
+  .slider-value {
+    font-weight: 600;
+    min-width: 28px;
+    text-align: right;
+  }
+  .chip-group { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: #fff;
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .chip input { margin: 0; }
+  .chip.active { background: var(--accent-soft); border-color: var(--accent); }
+
+  /* Table */
+  .table-wrapper {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    background: #fafbfc;
+    border-bottom: 1px solid var(--border);
+    padding: 10px 12px;
+    text-align: left;
+    font-size: 11px;
+    text-transform: uppercase;
+    color: var(--muted);
+    letter-spacing: 0.04em;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+  thead th .sort-arrow { color: var(--muted); margin-left: 4px; }
+  thead th.sorted .sort-arrow { color: var(--accent); }
+  tbody tr.lead-row { border-bottom: 1px solid var(--border); cursor: pointer; }
+  tbody tr.lead-row:hover { background: #fafbfc; }
+  tbody tr.lead-row.resolved { background: #f4faf6; }
+  tbody tr.lead-row.resolved:hover { background: #ebf6ef; }
+  tbody tr.lead-row.expanded { background: var(--accent-soft) !important; }
+  tbody td {
+    padding: 12px;
+    vertical-align: middle;
+  }
+  tbody td.company { font-weight: 600; }
+  tbody td.muted { color: var(--muted); }
+
+  /* Score badge */
+  .score-badge {
+    display: inline-block;
+    min-width: 36px;
+    padding: 4px 8px;
+    border-radius: 5px;
+    font-weight: 700;
+    font-size: 13px;
+    text-align: center;
+    color: #fff;
+  }
+  .score-badge.s80 { background: var(--danger); }
+  .score-badge.s60 { background: var(--orange); }
+  .score-badge.s40 { background: var(--yellow); color: #4a3a00; }
+  .score-badge.s0  { background: #8b94a4; }
+
+  /* Status badge */
+  .status-badge {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .status-Unresolved { background: var(--danger-soft); color: var(--danger); }
+  .status-Addressed { background: var(--orange-soft); color: var(--orange); }
+  .status-Resolved { background: var(--green-soft); color: var(--green); }
+  .status-Archived { background: var(--gray-soft); color: var(--muted); }
+  .status-NoEvents { background: var(--gray-soft); color: var(--muted); }
+
+  .donot-pill {
+    display: inline-block;
+    margin-left: 6px;
+    background: var(--green);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  /* Program tag */
+  .program-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+  }
+  .program-CWA { background: var(--cwa-soft); color: var(--cwa); }
+  .program-SDWA { background: var(--sdwa-soft); color: var(--sdwa); }
+
+  .new-flag {
+    display: inline-block;
+    background: var(--accent);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 5px;
+    border-radius: 3px;
+    margin-left: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  /* Detail panel */
+  tr.detail-row > td {
+    padding: 0;
+    background: #fbfcfd;
+    border-bottom: 1px solid var(--border);
+  }
+  .detail-panel {
+    padding: 18px 20px;
+    display: grid;
+    grid-template-columns: 1.1fr 1fr 1.1fr;
+    gap: 22px;
+  }
+  .detail-panel h3 {
+    font-size: 12px;
+    text-transform: uppercase;
+    color: var(--muted);
+    letter-spacing: 0.05em;
+    margin: 0 0 10px;
+    font-weight: 700;
+  }
+  .reasons-list { list-style: none; padding: 0; margin: 0; }
+  .reasons-list li {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0;
+    border-bottom: 1px dashed var(--border);
+  }
+  .reasons-list li:last-child { border-bottom: none; }
+  .point-pill {
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 700;
+    padding: 3px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+    min-width: 36px;
+    text-align: center;
+  }
+
+  .compliance-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 6px 12px;
+    font-size: 13px;
+  }
+  .compliance-grid .k { color: var(--muted); }
+  .compliance-grid .v { font-weight: 500; }
+
+  .history-strip {
+    display: flex;
+    gap: 3px;
+    margin-top: 6px;
+  }
+  .history-strip .q {
+    width: 18px;
+    height: 22px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 700;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .q-V { background: var(--danger); }
+  .q-S { background: #7a1e15; }
+  .q-C { background: var(--green); }
+  .q-N { background: var(--muted); }
+  .q-X { background: var(--gray-soft); color: var(--muted); }
+  .history-legend {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  .events-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    max-height: 260px;
+    overflow-y: auto;
+  }
+  .events-list li {
+    padding: 8px 0;
+    border-bottom: 1px dashed var(--border);
+    font-size: 12.5px;
+  }
+  .events-list li:last-child { border-bottom: none; }
+  .event-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    align-items: baseline;
+  }
+  .event-param { font-weight: 600; }
+  .event-date { color: var(--muted); font-size: 11px; white-space: nowrap; }
+  .event-detail { color: var(--muted); margin-top: 2px; font-size: 12px; }
+
+  .posture-box {
+    margin-top: 14px;
+    padding: 12px 14px;
+    border-radius: 6px;
+    border: 1px solid;
+    font-size: 13px;
+  }
+  .posture-Unresolved { background: var(--danger-soft); border-color: #f0bcb4; }
+  .posture-Addressed { background: var(--orange-soft); border-color: #f0caa5; }
+  .posture-Resolved { background: var(--green-soft); border-color: #b8dfc7; }
+  .posture-Archived { background: var(--gray-soft); border-color: #cdd1d8; }
+  .posture-NoEvents { background: var(--gray-soft); border-color: #cdd1d8; }
+  .posture-box .posture-title {
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 11px;
+    margin-bottom: 4px;
+  }
+
+  .detail-actions {
+    grid-column: 1 / -1;
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+
+  .empty-state {
+    padding: 60px 20px;
+    text-align: center;
+    color: var(--muted);
+  }
+
+  .file-input { display: none; }
+
+  /* Toast */
+  .toast {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: var(--text);
+    color: #fff;
+    padding: 10px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.18);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s;
+    z-index: 100;
+  }
+  .toast.show { opacity: 1; }
+
+  @media (max-width: 1100px) {
+    .filters { grid-template-columns: 1fr 1fr; }
+    .tiles { grid-template-columns: repeat(2, 1fr); }
+    .detail-panel { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="lag-banner">
+  <div class="lag-icon">!</div>
+  <div>
+    <strong>EPA reporting lag:</strong>
+    CWA data lags ~30&ndash;45 days &middot; SDWA data lags ~90 days.
+    <strong>Always verify a facility's current status before outreach</strong> &mdash; a "Resolved" row means they've already fixed it.
+  </div>
+</div>
+
+<div class="demo-banner" id="demoBanner">
+  <div class="demo-icon">D</div>
+  <div>
+    <strong>Demo data &mdash; not real facilities.</strong>
+    Company names, registry IDs, and permit numbers are fictional, so the "Open in EPA ECHO" link is disabled.
+    Click <strong>Upload CSV(s)</strong> above and select <code>all_leads.csv</code> <em>and</em> <code>violation_events.csv</code> together (cmd/ctrl-click both in the file picker) &mdash; the viewer detects each by its columns, so the order you pick doesn't matter. You can also upload just one.
+  </div>
+</div>
+
+<div class="header">
+  <div>
+    <h1>ChemTreat Water Violation Lead Viewer</h1>
+    <div class="meta">
+      <span id="dataSourceLabel">Demo data</span>
+      &middot; <span id="dataTimestamp">&mdash;</span>
+      &middot; <span id="leadCountLabel">0 facilities</span>
+    </div>
+  </div>
+  <div class="header-actions">
+    <input type="file" id="csvUpload" class="file-input" accept=".csv" multiple />
+    <button class="btn" id="uploadBtn" title="Select all_leads.csv and violation_events.csv at the same time (cmd/ctrl-click both) — order doesn't matter, the viewer detects each by its columns.">Upload CSV(s)&hellip;</button>
+    <button class="btn" id="resetBtn">Reset to demo data</button>
+  </div>
+</div>
+
+<div class="body">
+
+  <div class="tiles">
+    <div class="tile">
+      <div class="label">Total leads</div>
+      <div class="value"><span id="tileTotal">0</span> <span class="value-suffix">facilities</span></div>
+    </div>
+    <div class="tile hot">
+      <div class="label">Leads scoring &ge;70</div>
+      <div class="value"><span id="tileHot">0</span> <span class="value-suffix">facilities</span></div>
+    </div>
+    <div class="tile alert">
+      <div class="label">Newly SNC</div>
+      <div class="value"><span id="tileSnc">0</span> <span class="value-suffix">facilities</span></div>
+    </div>
+    <div class="tile calm">
+      <div class="label">Resolved &mdash; do not call</div>
+      <div class="value"><span id="tileResolved">0</span> <span class="value-suffix">facilities</span></div>
+    </div>
+  </div>
+
+  <div class="filters">
+    <div class="filter-group">
+      <label>State</label>
+      <select id="filterState" multiple></select>
+    </div>
+    <div class="filter-group">
+      <label>Program</label>
+      <select id="filterProgram">
+        <option value="">All programs</option>
+        <option value="CWA">CWA (wastewater)</option>
+        <option value="SDWA">SDWA (drinking water)</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label>Min score</label>
+      <div class="slider-row">
+        <input type="range" id="filterScore" min="0" max="100" step="5" value="0" />
+        <span class="slider-value" id="filterScoreValue">0</span>
+      </div>
+    </div>
+    <div class="filter-group">
+      <label>Status</label>
+      <div class="chip-group" id="filterStatus">
+        <label class="chip active"><input type="checkbox" value="Unresolved" checked /> Unresolved</label>
+        <label class="chip active"><input type="checkbox" value="Addressed" checked /> Addressed</label>
+        <label class="chip"><input type="checkbox" value="Resolved" /> Resolved</label>
+        <label class="chip"><input type="checkbox" value="Archived" /> Archived</label>
+        <label class="chip active"><input type="checkbox" value="NoEvents" checked /> No drill-down</label>
+      </div>
+    </div>
+    <div class="filter-group">
+      <label>Search</label>
+      <input type="text" id="filterSearch" placeholder="Company or city&hellip;" />
+    </div>
+  </div>
+
+  <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr>
+          <th data-sort="lead_score" class="sorted">Score <span class="sort-arrow">&darr;</span></th>
+          <th data-sort="company">Facility <span class="sort-arrow"></span></th>
+          <th data-sort="state">Location <span class="sort-arrow"></span></th>
+          <th data-sort="program">Program <span class="sort-arrow"></span></th>
+          <th>Top reason</th>
+          <th data-sort="status">Status <span class="sort-arrow"></span></th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="leadsBody"></tbody>
+    </table>
+    <div id="emptyState" class="empty-state" style="display:none;">
+      No leads match the current filters.
+    </div>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ---------- Seed data: realistic facilities matching pipeline CSV columns ---------- */
+const SEED_LEADS = [
+  {
+    lead_score: 94, score_reasons: "+40: Significant Non-Complier (SNC) | +32: 4 quarter(s) in non-compliance | +15: 2 formal enforcement action(s) in last 5 yr | +10: Major-permit facility | +8: Recent penalty $48,200 | +5: Inspected 62 days ago",
+    program: "CWA", registry_id: "110000412345", company: "Permian Basin Chemical Works",
+    address: "5400 Industrial Pkwy", city: "Odessa", state: "TX", zip: "79764", county: "Ector",
+    naics: "32519", sic: "2869", permit_id: "TX0012345",
+    snc_status: "Significant/Category I Noncompliance", snc_status_date: "2026-03-31", snc_event: "Effluent - Monthly Average Limit",
+    violation_status: "Yes", quarters_in_violation: "4", quarters_in_snc: "3",
+    compliance_history_13q: "VVVVSSSSCCCCC",
+    formal_actions_5yr: 2, informal_actions_5yr: 4, total_penalties_usd: 48200,
+    last_penalty_date: "2025-11-12", last_inspection_days_ago: 62, missing_dmr_quarters: 0,
+    status: "Unresolved", newly_snc: true,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=110000412345"
+  },
+  {
+    lead_score: 88, score_reasons: "+40: Significant Non-Complier (SNC) | +24: 3 quarter(s) in non-compliance | +15: 1 formal enforcement action(s) in last 5 yr | +5: Recent penalty $12,400 | +4: Inspected 145 days ago",
+    program: "CWA", registry_id: "110000418002", company: "Gulf Coast Refining LP",
+    address: "3100 Bayport Blvd", city: "Pasadena", state: "TX", zip: "77507", county: "Harris",
+    naics: "324110", sic: "2911", permit_id: "TX0084412",
+    snc_status: "Significant/Category I Noncompliance", snc_status_date: "2026-03-31", snc_event: "Permit Schedule Milestone",
+    violation_status: "Yes", quarters_in_violation: "3", quarters_in_snc: "2",
+    compliance_history_13q: "VVVSSCCCCCCCC",
+    formal_actions_5yr: 1, informal_actions_5yr: 2, total_penalties_usd: 12400,
+    last_penalty_date: "2025-09-04", last_inspection_days_ago: 145, missing_dmr_quarters: 1,
+    status: "Addressed", newly_snc: false,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=110000418002"
+  },
+  {
+    lead_score: 82, score_reasons: "+40: Significant Non-Complier (SNC) | +16: 2 quarter(s) in non-compliance | +15: 1 formal enforcement action(s) in last 5 yr | +6: Recent penalty $28,000 | +5: Inspected 91 days ago",
+    program: "CWA", registry_id: "110000422119", company: "Lake Charles Polymers",
+    address: "1820 Riverbend Rd", city: "Lake Charles", state: "LA", zip: "70615", county: "Calcasieu",
+    naics: "325211", sic: "2821", permit_id: "LA0023110",
+    snc_status: "Significant/Category I Noncompliance", snc_status_date: "2026-03-31", snc_event: "Effluent - Daily Maximum",
+    violation_status: "Yes", quarters_in_violation: "2", quarters_in_snc: "2",
+    compliance_history_13q: "VVSSCCCCCCCCC",
+    formal_actions_5yr: 1, informal_actions_5yr: 1, total_penalties_usd: 28000,
+    last_penalty_date: "2025-08-20", last_inspection_days_ago: 91, missing_dmr_quarters: 0,
+    status: "Unresolved", newly_snc: true,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=110000422119"
+  },
+  {
+    lead_score: 76, score_reasons: "+24: 3 quarter(s) in non-compliance | +15: 1 formal enforcement action(s) in last 5 yr | +10: Major-permit facility | +5: Recent penalty $7,500 | +5: Inspected 38 days ago | +17: Chronic effluent exceedance trend",
+    program: "CWA", registry_id: "110000401844", company: "Allegheny Steel Mill #4",
+    address: "200 Furnace Way", city: "Pittsburgh", state: "PA", zip: "15203", county: "Allegheny",
+    naics: "331110", sic: "3312", permit_id: "PA0031022",
+    snc_status: "No Violation Identified", snc_status_date: "2026-03-31", snc_event: "",
+    violation_status: "Yes", quarters_in_violation: "3", quarters_in_snc: "0",
+    compliance_history_13q: "VVVCCCCCCCCCC",
+    formal_actions_5yr: 1, informal_actions_5yr: 3, total_penalties_usd: 7500,
+    last_penalty_date: "2025-10-15", last_inspection_days_ago: 38, missing_dmr_quarters: 0,
+    status: "Unresolved", newly_snc: false,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=110000401844"
+  },
+  {
+    lead_score: 74, score_reasons: "+40: Significant Non-Complier (SNC) | +16: 2 quarter(s) in non-compliance | +10: Major-permit facility | +8: Recent penalty $52,100",
+    program: "SDWA", registry_id: "PWS-OH4700412", company: "Riverview Municipal Water",
+    address: "85 Water Plant Rd", city: "Marietta", state: "OH", zip: "45750", county: "Washington",
+    naics: "221310", sic: "4941", permit_id: "OH4700412",
+    snc_status: "SDWA SNC - Treatment Technique", snc_status_date: "2026-02-28", snc_event: "TT failure - filtration",
+    violation_status: "Yes", quarters_in_violation: "2", quarters_in_snc: "1",
+    compliance_history_13q: "VVCCCCCCCCCCC",
+    formal_actions_5yr: 1, informal_actions_5yr: 0, total_penalties_usd: 52100,
+    last_penalty_date: "2025-12-10", last_inspection_days_ago: 220, missing_dmr_quarters: 0,
+    status: "Unresolved", newly_snc: true,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=PWS-OH4700412"
+  },
+  {
+    lead_score: 68, score_reasons: "+16: 2 quarter(s) in non-compliance | +15: 1 formal enforcement action(s) in last 5 yr | +10: Major-permit facility | +5: Recent penalty $9,200 | +5: Inspected 110 days ago | +17: Repeat BOD exceedance",
+    program: "CWA", registry_id: "110000404012", company: "Ohio Valley Paperboard Co",
+    address: "12 Mill St", city: "Chillicothe", state: "OH", zip: "45601", county: "Ross",
+    naics: "322130", sic: "2631", permit_id: "OH0041220",
+    snc_status: "No Violation Identified", snc_status_date: "2026-03-31", snc_event: "",
+    violation_status: "Yes", quarters_in_violation: "2", quarters_in_snc: "0",
+    compliance_history_13q: "VVCCCCCCCCCCC",
+    formal_actions_5yr: 1, informal_actions_5yr: 2, total_penalties_usd: 9200,
+    last_penalty_date: "2025-07-22", last_inspection_days_ago: 110, missing_dmr_quarters: 0,
+    status: "Addressed", newly_snc: false,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=110000404012"
+  },
+  {
+    lead_score: 64, score_reasons: "+16: 2 quarter(s) in non-compliance | +15: 1 formal enforcement action(s) in last 5 yr | +10: Major-permit facility | +5: Recent penalty $4,800 | +5: Inspected 75 days ago | +13: BOD trend",
+    program: "CWA", registry_id: "110000408219", company: "Mountaineer Power Station Unit 3",
+    address: "1 Power Plant Rd", city: "New Haven", state: "WV", zip: "25265", county: "Mason",
+    naics: "221112", sic: "4911", permit_id: "WV0001142",
+    snc_status: "No Violation Identified", snc_status_date: "2026-03-31", snc_event: "",
+    violation_status: "Yes", quarters_in_violation: "2", quarters_in_snc: "0",
+    compliance_history_13q: "VVCCCCCCCCCCC",
+    formal_actions_5yr: 1, informal_actions_5yr: 1, total_penalties_usd: 4800,
+    last_penalty_date: "2025-06-10", last_inspection_days_ago: 75, missing_dmr_quarters: 0,
+    status: "Unresolved", newly_snc: false,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=110000408219"
+  },
+  {
+    lead_score: 60, score_reasons: "+24: 3 quarter(s) in non-compliance | +15: 1 formal enforcement action(s) in last 5 yr | +5: Recent penalty $6,100 | +5: Inspected 165 days ago | +11: Repeated TSS exceedance",
+    program: "CWA", registry_id: "110000413309", company: "Beaumont Aromatics Plant",
+    address: "8800 Spindletop Ave", city: "Beaumont", state: "TX", zip: "77705", county: "Jefferson",
+    naics: "325110", sic: "2865", permit_id: "TX0089714",
+    snc_status: "No Violation Identified", snc_status_date: "2026-03-31", snc_event: "",
+    violation_status: "Yes", quarters_in_violation: "3", quarters_in_snc: "0",
+    compliance_history_13q: "VVVCCCCCCCCCC",
+    formal_actions_5yr: 1, informal_actions_5yr: 2, total_penalties_usd: 6100,
+    last_penalty_date: "2025-04-19", last_inspection_days_ago: 165, missing_dmr_quarters: 0,
+    status: "Unresolved", newly_snc: false,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=110000413309"
+  },
+  {
+    lead_score: 58, score_reasons: "+24: 3 quarter(s) in non-compliance | +10: Major-permit facility | +5: Recent penalty $3,200 | +5: Inspected 195 days ago | +14: TSS trend",
+    program: "SDWA", registry_id: "PWS-LA1057721", company: "Acadiana Regional Water Authority",
+    address: "411 Bayou Dr", city: "Lafayette", state: "LA", zip: "70506", county: "Lafayette",
+    naics: "221310", sic: "4941", permit_id: "LA1057721",
+    snc_status: "No Violation Identified", snc_status_date: "2026-02-28", snc_event: "",
+    violation_status: "Yes", quarters_in_violation: "3", quarters_in_snc: "0",
+    compliance_history_13q: "VVVCCCCCCCCCC",
+    formal_actions_5yr: 0, informal_actions_5yr: 1, total_penalties_usd: 3200,
+    last_penalty_date: "2025-05-30", last_inspection_days_ago: 195, missing_dmr_quarters: 0,
+    status: "Unresolved", newly_snc: false,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=PWS-LA1057721"
+  },
+  {
+    lead_score: 52, score_reasons: "+15: 1 formal enforcement action(s) in last 5 yr | +10: Major-permit facility | +8: Recent penalty $36,500 | +5: Inspected 240 days ago | +14: Effluent ammonia exceedance",
+    program: "CWA", registry_id: "110000419911", company: "Tri-State Foods Processing",
+    address: "775 Industrial Loop", city: "Wheeling", state: "WV", zip: "26003", county: "Ohio",
+    naics: "311615", sic: "2013", permit_id: "WV0029112",
+    snc_status: "No Violation Identified", snc_status_date: "2026-03-31", snc_event: "",
+    violation_status: "Yes", quarters_in_violation: "1", quarters_in_snc: "0",
+    compliance_history_13q: "VCCCCCCCCCCCC",
+    formal_actions_5yr: 1, informal_actions_5yr: 1, total_penalties_usd: 36500,
+    last_penalty_date: "2025-03-15", last_inspection_days_ago: 240, missing_dmr_quarters: 0,
+    status: "Addressed", newly_snc: false,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=110000419911"
+  },
+  {
+    lead_score: 48, score_reasons: "+15: 1 formal enforcement action(s) in last 5 yr | +5: Recent penalty $2,800 | +5: Inspected 88 days ago | +23: Multiple parameter exceedances",
+    program: "CWA", registry_id: "110000425550", company: "Cuyahoga Plating & Finishing",
+    address: "210 Industrial Blvd", city: "Cleveland", state: "OH", zip: "44115", county: "Cuyahoga",
+    naics: "332813", sic: "3471", permit_id: "OH0099221",
+    snc_status: "No Violation Identified", snc_status_date: "2026-03-31", snc_event: "",
+    violation_status: "Yes", quarters_in_violation: "1", quarters_in_snc: "0",
+    compliance_history_13q: "VCCCCCCCCCCCC",
+    formal_actions_5yr: 1, informal_actions_5yr: 1, total_penalties_usd: 2800,
+    last_penalty_date: "2025-08-04", last_inspection_days_ago: 88, missing_dmr_quarters: 0,
+    status: "Unresolved", newly_snc: false,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=110000425550"
+  },
+  {
+    lead_score: 45, score_reasons: "+8: 1 quarter(s) in non-compliance | +10: Major-permit facility | +5: Recent penalty $1,800 | +5: Inspected 55 days ago | +17: TSS exceedance",
+    program: "CWA", registry_id: "110000428771", company: "Schuylkill Valley Brewing",
+    address: "44 Brewery Ln", city: "Reading", state: "PA", zip: "19601", county: "Berks",
+    naics: "312120", sic: "2082", permit_id: "PA0067712",
+    snc_status: "No Violation Identified", snc_status_date: "2026-03-31", snc_event: "",
+    violation_status: "Yes", quarters_in_violation: "1", quarters_in_snc: "0",
+    compliance_history_13q: "VCCCCCCCCCCCC",
+    formal_actions_5yr: 0, informal_actions_5yr: 1, total_penalties_usd: 1800,
+    last_penalty_date: "2025-09-22", last_inspection_days_ago: 55, missing_dmr_quarters: 0,
+    status: "Unresolved", newly_snc: false,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=110000428771"
+  },
+  {
+    lead_score: 42, score_reasons: "+8: 1 quarter(s) in non-compliance | +10: Major-permit facility | +5: Inspected 120 days ago | +19: Coagulant dosing issue (TT)",
+    program: "SDWA", registry_id: "PWS-PA2009134", company: "Borough of Lewistown Water",
+    address: "200 Pump Station Rd", city: "Lewistown", state: "PA", zip: "17044", county: "Mifflin",
+    naics: "221310", sic: "4941", permit_id: "PA2009134",
+    snc_status: "No Violation Identified", snc_status_date: "2026-02-28", snc_event: "",
+    violation_status: "Yes", quarters_in_violation: "1", quarters_in_snc: "0",
+    compliance_history_13q: "VCCCCCCCCCCCC",
+    formal_actions_5yr: 0, informal_actions_5yr: 0, total_penalties_usd: 0,
+    last_penalty_date: "", last_inspection_days_ago: 120, missing_dmr_quarters: 0,
+    status: "Unresolved", newly_snc: false,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=PWS-PA2009134"
+  },
+  {
+    lead_score: 38, score_reasons: "+10: Major-permit facility | +5: Recent penalty $950 | +5: Inspected 70 days ago | +18: Single TSS exceedance",
+    program: "CWA", registry_id: "110000430115", company: "Wheeling Galvanizing",
+    address: "1 Riverfront Way", city: "Wheeling", state: "WV", zip: "26003", county: "Ohio",
+    naics: "332812", sic: "3479", permit_id: "WV0035001",
+    snc_status: "No Violation Identified", snc_status_date: "2026-03-31", snc_event: "",
+    violation_status: "Yes", quarters_in_violation: "1", quarters_in_snc: "0",
+    compliance_history_13q: "VCCCCCCCCCCCC",
+    formal_actions_5yr: 0, informal_actions_5yr: 0, total_penalties_usd: 950,
+    last_penalty_date: "2025-10-30", last_inspection_days_ago: 70, missing_dmr_quarters: 0,
+    status: "Unresolved", newly_snc: false,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=110000430115"
+  },
+  {
+    lead_score: 78, score_reasons: "+40: Significant Non-Complier (SNC) | +16: 2 quarter(s) in non-compliance | +15: 1 formal enforcement action(s) in last 5 yr | +7: Recent penalty $22,000",
+    program: "SDWA", registry_id: "PWS-TX0570012", company: "Brazos Valley Water Co-op",
+    address: "9 Coop Way", city: "Bryan", state: "TX", zip: "77803", county: "Brazos",
+    naics: "221310", sic: "4941", permit_id: "TX0570012",
+    snc_status: "SDWA SNC - MCL Exceedance", snc_status_date: "2026-02-28", snc_event: "MCL - Total Trihalomethanes",
+    violation_status: "Yes", quarters_in_violation: "2", quarters_in_snc: "1",
+    compliance_history_13q: "VVCCCCCCCCCCC",
+    formal_actions_5yr: 1, informal_actions_5yr: 1, total_penalties_usd: 22000,
+    last_penalty_date: "2025-11-28", last_inspection_days_ago: 180, missing_dmr_quarters: 0,
+    status: "Resolved", newly_snc: false,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=PWS-TX0570012"
+  },
+  {
+    lead_score: 66, score_reasons: "+16: 2 quarter(s) in non-compliance | +15: 1 formal enforcement action(s) in last 5 yr | +10: Major-permit facility | +7: Recent penalty $18,400 | +18: Effluent metals exceedance",
+    program: "CWA", registry_id: "110000432200", company: "Galveston Bay Specialty Chem",
+    address: "1500 Refinery Row", city: "Texas City", state: "TX", zip: "77590", county: "Galveston",
+    naics: "325199", sic: "2869", permit_id: "TX0099001",
+    snc_status: "No Violation Identified", snc_status_date: "2026-03-31", snc_event: "",
+    violation_status: "Yes", quarters_in_violation: "2", quarters_in_snc: "0",
+    compliance_history_13q: "VVCCCCCCCCCCC",
+    formal_actions_5yr: 1, informal_actions_5yr: 1, total_penalties_usd: 18400,
+    last_penalty_date: "2025-09-17", last_inspection_days_ago: 130, missing_dmr_quarters: 0,
+    status: "Resolved", newly_snc: false,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=110000432200"
+  },
+  {
+    lead_score: 32, score_reasons: "+8: 1 quarter(s) in non-compliance | +5: Inspected 200 days ago | +19: Monitoring exceedance",
+    program: "SDWA", registry_id: "PWS-OH4900117", company: "Hocking Hills Resort Water",
+    address: "21000 Resort Rd", city: "Logan", state: "OH", zip: "43138", county: "Hocking",
+    naics: "221310", sic: "4941", permit_id: "OH4900117",
+    snc_status: "No Violation Identified", snc_status_date: "2026-02-28", snc_event: "",
+    violation_status: "Yes", quarters_in_violation: "1", quarters_in_snc: "0",
+    compliance_history_13q: "VCCCCCCCCCCCC",
+    formal_actions_5yr: 0, informal_actions_5yr: 0, total_penalties_usd: 0,
+    last_penalty_date: "", last_inspection_days_ago: 200, missing_dmr_quarters: 0,
+    status: "Archived", newly_snc: false,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=PWS-OH4900117"
+  },
+  {
+    lead_score: 56, score_reasons: "+16: 2 quarter(s) in non-compliance | +10: Major-permit facility | +5: Recent penalty $3,400 | +5: Inspected 95 days ago | +20: Repeated BOD exceedance",
+    program: "CWA", registry_id: "110000434910", company: "Susquehanna Pulp & Paper",
+    address: "401 Riverside Rd", city: "Harrisburg", state: "PA", zip: "17110", county: "Dauphin",
+    naics: "322110", sic: "2611", permit_id: "PA0044410",
+    snc_status: "No Violation Identified", snc_status_date: "2026-03-31", snc_event: "",
+    violation_status: "Yes", quarters_in_violation: "2", quarters_in_snc: "0",
+    compliance_history_13q: "VVCCCCCCCCCCC",
+    formal_actions_5yr: 0, informal_actions_5yr: 1, total_penalties_usd: 3400,
+    last_penalty_date: "2025-07-08", last_inspection_days_ago: 95, missing_dmr_quarters: 0,
+    status: "Unresolved", newly_snc: false,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=110000434910"
+  }
+];
+
+const SEED_EVENTS = [
+  // Permian Basin Chemical Works - CWA
+  { registry_id: "110000412345", program: "CWA", parameter: "BOD, 5-day", limit_value: 30, dmr_value: 78, exceedance_pct: 160, period_end: "2026-02-28", status: "Unresolved", data_lag_note: "CWA DMR data lags ~30-45 days" },
+  { registry_id: "110000412345", program: "CWA", parameter: "Total Suspended Solids", limit_value: 45, dmr_value: 92, exceedance_pct: 104, period_end: "2026-01-31", status: "Unresolved", data_lag_note: "CWA DMR data lags ~30-45 days" },
+  { registry_id: "110000412345", program: "CWA", parameter: "Oil & Grease", limit_value: 15, dmr_value: 28, exceedance_pct: 87, period_end: "2025-12-31", status: "Unresolved", data_lag_note: "CWA DMR data lags ~30-45 days" },
+  // Gulf Coast Refining
+  { registry_id: "110000418002", program: "CWA", parameter: "Phenol, Total", limit_value: 0.5, dmr_value: 1.4, exceedance_pct: 180, period_end: "2026-02-28", status: "Addressed", data_lag_note: "CWA DMR data lags ~30-45 days" },
+  { registry_id: "110000418002", program: "CWA", parameter: "Ammonia as N", limit_value: 6.0, dmr_value: 11.2, exceedance_pct: 87, period_end: "2026-01-31", status: "Addressed", data_lag_note: "CWA DMR data lags ~30-45 days" },
+  // Lake Charles Polymers
+  { registry_id: "110000422119", program: "CWA", parameter: "Total Suspended Solids", limit_value: 30, dmr_value: 55, exceedance_pct: 83, period_end: "2026-02-28", status: "Unresolved", data_lag_note: "CWA DMR data lags ~30-45 days" },
+  { registry_id: "110000422119", program: "CWA", parameter: "BOD, 5-day", limit_value: 20, dmr_value: 41, exceedance_pct: 105, period_end: "2026-01-31", status: "Unresolved", data_lag_note: "CWA DMR data lags ~30-45 days" },
+  // Allegheny Steel
+  { registry_id: "110000401844", program: "CWA", parameter: "Iron, Total", limit_value: 2.0, dmr_value: 3.6, exceedance_pct: 80, period_end: "2026-02-28", status: "Unresolved", data_lag_note: "CWA DMR data lags ~30-45 days" },
+  { registry_id: "110000401844", program: "CWA", parameter: "Total Suspended Solids", limit_value: 30, dmr_value: 47, exceedance_pct: 57, period_end: "2026-01-31", status: "Unresolved", data_lag_note: "CWA DMR data lags ~30-45 days" },
+  // Riverview Municipal - SDWA
+  { registry_id: "PWS-OH4700412", program: "SDWA", violation_description: "Treatment Technique - Filtration", contaminant: "Turbidity", period_end: "2025-12-31", status: "Unresolved", data_lag_note: "SDWA reporting lags ~90 days" },
+  { registry_id: "PWS-OH4700412", program: "SDWA", violation_description: "Treatment Technique - Disinfection", contaminant: "Coliform", period_end: "2025-11-30", status: "Unresolved", data_lag_note: "SDWA reporting lags ~90 days" },
+  // Ohio Valley Paperboard
+  { registry_id: "110000404012", program: "CWA", parameter: "BOD, 5-day", limit_value: 25, dmr_value: 38, exceedance_pct: 52, period_end: "2026-02-28", status: "Addressed", data_lag_note: "CWA DMR data lags ~30-45 days" },
+  // Mountaineer Power
+  { registry_id: "110000408219", program: "CWA", parameter: "Selenium, Total", limit_value: 0.005, dmr_value: 0.012, exceedance_pct: 140, period_end: "2026-01-31", status: "Unresolved", data_lag_note: "CWA DMR data lags ~30-45 days" },
+  // Brazos Valley - Resolved (do not call)
+  { registry_id: "PWS-TX0570012", program: "SDWA", violation_description: "MCL - Total Trihalomethanes", contaminant: "TTHM", period_end: "2025-09-30", resolved_date: "2026-01-15", status: "Resolved", data_lag_note: "SDWA reporting lags ~90 days" },
+  // Galveston Bay - Resolved
+  { registry_id: "110000432200", program: "CWA", parameter: "Zinc, Total", limit_value: 0.5, dmr_value: 0.78, exceedance_pct: 56, period_end: "2025-10-31", status: "Resolved", data_lag_note: "CWA DMR data lags ~30-45 days" },
+  // Susquehanna
+  { registry_id: "110000434910", program: "CWA", parameter: "BOD, 5-day", limit_value: 30, dmr_value: 52, exceedance_pct: 73, period_end: "2026-02-28", status: "Unresolved", data_lag_note: "CWA DMR data lags ~30-45 days" }
+];
+
+/* ---------- State ---------- */
+let leads = [];
+let events = [];
+let sortKey = "lead_score";
+let sortDir = -1;
+let expandedId = null;
+let dataSource = "demo";
+let isDemoData = true;
+
+/* ---------- Helpers ---------- */
+function scoreClass(s) {
+  if (s >= 80) return "s80";
+  if (s >= 60) return "s60";
+  if (s >= 40) return "s40";
+  return "s0";
+}
+function fmtMoney(n) {
+  const v = Number(n) || 0;
+  if (!v) return "$0";
+  return "$" + v.toLocaleString();
+}
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function topReason(score_reasons) {
+  if (!score_reasons) return "";
+  const parts = String(score_reasons).split("|").map(s => s.trim()).filter(Boolean);
+  if (!parts.length) return "";
+  let best = parts[0], bestPts = -1;
+  for (const p of parts) {
+    const m = p.match(/^\+?(-?\d+)/);
+    const pts = m ? parseInt(m[1], 10) : 0;
+    if (pts > bestPts) { bestPts = pts; best = p; }
+  }
+  return best;
+}
+function parseReasons(score_reasons) {
+  if (!score_reasons) return [];
+  return String(score_reasons).split("|").map(s => s.trim()).filter(Boolean).map(p => {
+    const m = p.match(/^\+?(-?\d+)\s*:\s*(.*)$/);
+    return m ? { points: parseInt(m[1], 10), text: m[2] } : { points: 0, text: p };
+  }).sort((a,b) => b.points - a.points);
+}
+function postureText(status) {
+  switch (status) {
+    case "Unresolved": return "Active opportunity — violation is open. Sales should research the account, reference public ECHO data, and approach with a process-improvement angle (not 'we saw you got fined').";
+    case "Addressed":  return "Formal enforcement underway. Real budget and remediation timeline likely exist, but the facility may already have a vendor lined up. Confirm before pitching.";
+    case "Resolved":   return "DO NOT cold-call about this violation — the facility has already returned to compliance. Use only for territory awareness.";
+    case "Archived":   return "Stale (>5 yr). Treat as historical context; ignore for active outreach.";
+    case "NoEvents":   return "No individual violation events were drilled for this facility — the pipeline only drills high-scoring leads via the per-facility DFR endpoint. The score reflects EPA's facility-level compliance flags (SNC, formal actions, quarters in non-compliance). Verify current status on ECHO before outreach.";
+    default: return "";
+  }
+}
+
+/* The pipeline emits an `outreach_posture` column on all_leads.csv with values
+ * { active, enforcement_underway, verify_first, historical, no_events }. The
+ * viewer's existing status-pill / posture-box / filter-chip vocabulary is
+ * { Unresolved, Addressed, Resolved, Archived } plus the new NoEvents bucket.
+ * This map keeps the rendering layer unchanged and absorbs the rename at the
+ * data boundary. See RATIONALE.md gap #1. */
+const POSTURE_MAP = {
+  active: "Unresolved",
+  enforcement_underway: "Addressed",
+  verify_first: "Resolved",
+  historical: "Archived",
+  no_events: "NoEvents",
+};
+function showToast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => t.classList.remove("show"), 2200);
+}
+
+/* ---------- CSV parser (handles quoted fields w/ commas + embedded quotes) ---------- */
+function parseCSV(text) {
+  const rows = [];
+  let cur = [], field = "", inQuotes = false, i = 0;
+  text = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  while (i < text.length) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i+1] === '"') { field += '"'; i += 2; continue; }
+        inQuotes = false; i++; continue;
+      }
+      field += c; i++; continue;
+    }
+    if (c === '"') { inQuotes = true; i++; continue; }
+    if (c === ',') { cur.push(field); field = ""; i++; continue; }
+    if (c === '\n') { cur.push(field); rows.push(cur); cur = []; field = ""; i++; continue; }
+    field += c; i++;
+  }
+  if (field !== "" || cur.length) { cur.push(field); rows.push(cur); }
+  if (!rows.length) return [];
+  const header = rows[0].map(h => h.trim());
+  return rows.slice(1).filter(r => r.length > 1 || (r[0] && r[0].trim() !== "")).map(r => {
+    const o = {};
+    header.forEach((h, idx) => { o[h] = r[idx] != null ? r[idx] : ""; });
+    return o;
+  });
+}
+
+/* ---------- Render ---------- */
+function setLeads(newLeads, newEvents, sourceLabel, isDemo) {
+  isDemoData = !!isDemo;
+  document.getElementById("demoBanner").classList.toggle("hidden", !isDemoData);
+  leads = newLeads.map(l => ({
+    ...l,
+    lead_score: Number(l.lead_score) || 0,
+    total_penalties_usd: Number(l.total_penalties_usd) || 0,
+    formal_actions_5yr: Number(l.formal_actions_5yr) || 0,
+    informal_actions_5yr: Number(l.informal_actions_5yr) || 0,
+    last_inspection_days_ago: l.last_inspection_days_ago === "" || l.last_inspection_days_ago == null
+      ? null : Number(l.last_inspection_days_ago),
+    status: (
+      // Prefer the pipeline's aggregated outreach_posture (closes
+      // RATIONALE.md gap #1). Fall back to a literal `status` for
+      // backwards compatibility with the seed data, then to a legacy
+      // regex on snc_status, then to Unresolved as a last resort.
+      l.outreach_posture
+        ? (POSTURE_MAP[String(l.outreach_posture).toLowerCase()] || "NoEvents")
+        : (l.status
+           || (l.snc_status && /resolved/i.test(l.snc_status) ? "Resolved" : "Unresolved"))
+    ),
+    newly_snc: l.newly_snc === true || l.newly_snc === "true" || l.newly_snc === "True"
+  }));
+  events = newEvents || [];
+  dataSource = sourceLabel;
+  document.getElementById("dataSourceLabel").textContent = sourceLabel;
+  document.getElementById("dataTimestamp").textContent = "Loaded " + new Date().toLocaleString();
+  expandedId = null;
+  populateStateFilter();
+  render();
+}
+
+function populateStateFilter() {
+  const sel = document.getElementById("filterState");
+  const states = Array.from(new Set(leads.map(l => l.state).filter(Boolean))).sort();
+  sel.innerHTML = states.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
+}
+
+function getFilters() {
+  const states = Array.from(document.getElementById("filterState").selectedOptions).map(o => o.value);
+  const program = document.getElementById("filterProgram").value;
+  const minScore = Number(document.getElementById("filterScore").value);
+  const statusBoxes = Array.from(document.querySelectorAll("#filterStatus input:checked")).map(c => c.value);
+  const search = document.getElementById("filterSearch").value.trim().toLowerCase();
+  return { states, program, minScore, statuses: statusBoxes, search };
+}
+
+function applyFilters(rows) {
+  const f = getFilters();
+  return rows.filter(r => {
+    if (f.states.length && !f.states.includes(r.state)) return false;
+    if (f.program && r.program !== f.program) return false;
+    if (r.lead_score < f.minScore) return false;
+    if (f.statuses.length && !f.statuses.includes(r.status)) return false;
+    if (f.search) {
+      const hay = ((r.company||"") + " " + (r.city||"") + " " + (r.permit_id||"")).toLowerCase();
+      if (!hay.includes(f.search)) return false;
+    }
+    return true;
+  });
+}
+
+function sortRows(rows) {
+  const dir = sortDir;
+  return rows.slice().sort((a, b) => {
+    let av = a[sortKey], bv = b[sortKey];
+    if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
+    av = (av == null ? "" : String(av)).toLowerCase();
+    bv = (bv == null ? "" : String(bv)).toLowerCase();
+    return av < bv ? -1 * dir : av > bv ? 1 * dir : 0;
+  });
+}
+
+function renderTiles(filtered) {
+  document.getElementById("tileTotal").textContent = filtered.length;
+  document.getElementById("tileHot").textContent = filtered.filter(r => r.lead_score >= 70).length;
+  document.getElementById("tileSnc").textContent = filtered.filter(r => r.newly_snc).length;
+  document.getElementById("tileResolved").textContent = leads.filter(r => r.status === "Resolved").length;
+  document.getElementById("leadCountLabel").textContent = leads.length + " facilities";
+}
+
+function renderHistory(hist) {
+  if (!hist) return "<span class='muted'>&mdash;</span>";
+  const chars = String(hist).slice(0, 13).padEnd(13, "X").split("");
+  return `<div class="history-strip">` +
+    chars.map(c => `<span class="q q-${c}">${c === "X" ? "" : c}</span>`).join("") +
+    `</div><div class="history-legend">V = violation &middot; S = SNC &middot; C = compliant &middot; N = no data &middot; oldest &rarr; newest</div>`;
+}
+
+function renderEvents(reg_id) {
+  const matches = events.filter(e => e.registry_id === reg_id);
+  if (!matches.length) {
+    return "<div style='color:var(--muted);font-size:12.5px;'>No individual events available for this facility.</div>";
+  }
+  const norm = s => String(s || "").trim().toLowerCase();
+  return `<ul class="events-list">` + matches.map(e => {
+    const param = e.parameter || e.violation_description || e.contaminant || "Violation event";
+    let detail = "";
+    if (e.parameter) {
+      detail = `Limit ${e.limit_value ?? "?"} ${e.limit_unit || ""} &middot; measured ${e.dmr_value ?? "?"} ${e.dmr_unit || ""}${e.exceedance_pct ? ` &middot; <strong>${Number(e.exceedance_pct).toFixed(0)}% over</strong>` : ""}`;
+    } else if (e.contaminant) {
+      const cn = norm(e.contaminant);
+      const skipContaminant = !cn
+        || cn === norm(e.violation_description)
+        || cn === norm(e.violation_category)
+        || cn === norm(e.rule_family)
+        || cn === norm(param);
+      if (!skipContaminant) detail = `Contaminant: ${escapeHtml(e.contaminant)}`;
+    }
+    return `<li>
+      <div class="event-head">
+        <span class="event-param">${escapeHtml(param)}</span>
+        <span class="event-date">${escapeHtml(e.period_end || "")}</span>
+      </div>
+      ${detail ? `<div class="event-detail">${detail}</div>` : ""}
+      ${e.status ? `<div style="margin-top:4px;"><span class="status-badge status-${escapeHtml(e.status)}">${escapeHtml(e.status)}</span></div>` : ""}
+    </li>`;
+  }).join("") + `</ul>`;
+}
+
+function renderDetail(r) {
+  const reasons = parseReasons(r.score_reasons);
+  return `<div class="detail-panel">
+    <div>
+      <h3>Why this score: ${r.lead_score}</h3>
+      <ul class="reasons-list">
+        ${reasons.map(rs => `
+          <li>
+            <span class="point-pill">+${rs.points}</span>
+            <span>${escapeHtml(rs.text)}</span>
+          </li>`).join("")}
+      </ul>
+      <div class="posture-box posture-${escapeHtml(r.status)}">
+        <div class="posture-title">Outreach posture &mdash; ${escapeHtml(r.status)}</div>
+        <div>${escapeHtml(postureText(r.status))}</div>
+      </div>
+    </div>
+    <div>
+      <h3>Compliance snapshot</h3>
+      <div class="compliance-grid">
+        <div class="k">SNC status</div><div class="v">${escapeHtml(r.snc_status || "—")}</div>
+        ${r.snc_event ? `<div class="k">SNC event</div><div class="v">${escapeHtml(r.snc_event)}</div>` : ""}
+        <div class="k">Quarters in non-compliance</div><div class="v">${escapeHtml(r.quarters_in_violation ?? "—")}</div>
+        <div class="k">Quarters in SNC</div><div class="v">${escapeHtml(r.quarters_in_snc ?? "—")}</div>
+        <div class="k">Formal actions (5 yr)</div><div class="v">${r.formal_actions_5yr}</div>
+        <div class="k">Informal actions (5 yr)</div><div class="v">${r.informal_actions_5yr}</div>
+        <div class="k">Total penalties</div><div class="v">${fmtMoney(r.total_penalties_usd)}</div>
+        <div class="k">Last penalty</div><div class="v">${escapeHtml(r.last_penalty_date || "—")}</div>
+        <div class="k">Days since inspection</div><div class="v">${r.last_inspection_days_ago == null ? "—" : r.last_inspection_days_ago}</div>
+        ${(() => {
+          const naics = (r.naics || "").trim();
+          const permit = (r.permit_id || "").trim();
+          if (naics && permit) return `<div class="k">NAICS / permit</div><div class="v">${escapeHtml(naics)} &middot; ${escapeHtml(permit)}</div>`;
+          if (permit) return `<div class="k">Permit</div><div class="v">${escapeHtml(permit)}</div>`;
+          if (naics) return `<div class="k">NAICS</div><div class="v">${escapeHtml(naics)}</div>`;
+          return "";
+        })()}
+      </div>
+      <div style="margin-top:14px;">
+        <h3 style="margin-bottom:4px;">13-quarter compliance history</h3>
+        ${renderHistory(r.compliance_history_13q)}
+      </div>
+    </div>
+    <div>
+      <h3>Recent violation events</h3>
+      ${renderEvents(r.registry_id)}
+    </div>
+    <div class="detail-actions">
+      ${isDemoData
+        ? `<button class="btn btn-disabled" disabled title="Demo data — ECHO link unavailable for fictional facilities. Upload a real CSV to enable.">Open in EPA ECHO &rarr;</button>`
+        : (r.echo_url ? `<a class="btn btn-primary" href="${escapeHtml(r.echo_url)}" target="_blank" rel="noopener">Open in EPA ECHO &rarr;</a>` : "")}
+      <button class="btn" data-copy="${escapeHtml(r.registry_id)}">Copy facility summary</button>
+    </div>
+  </div>`;
+}
+
+function render() {
+  const filtered = sortRows(applyFilters(leads));
+  renderTiles(filtered);
+  const body = document.getElementById("leadsBody");
+  const empty = document.getElementById("emptyState");
+
+  // Sort arrows
+  document.querySelectorAll("thead th[data-sort]").forEach(th => {
+    const key = th.dataset.sort;
+    const arrow = th.querySelector(".sort-arrow");
+    th.classList.toggle("sorted", key === sortKey);
+    arrow.textContent = key === sortKey ? (sortDir === 1 ? "↑" : "↓") : "";
+  });
+
+  if (!filtered.length) {
+    body.innerHTML = "";
+    empty.style.display = "block";
+    return;
+  }
+  empty.style.display = "none";
+
+  const rows = [];
+  for (const r of filtered) {
+    const resolvedClass = r.status === "Resolved" ? " resolved" : "";
+    const expandedClass = r.registry_id === expandedId ? " expanded" : "";
+    rows.push(`
+      <tr class="lead-row${resolvedClass}${expandedClass}" data-id="${escapeHtml(r.registry_id)}">
+        <td><span class="score-badge ${scoreClass(r.lead_score)}">${r.lead_score}</span></td>
+        <td class="company">
+          ${escapeHtml(r.company || "—")}
+          ${r.newly_snc ? '<span class="new-flag">Newly SNC</span>' : ""}
+        </td>
+        <td class="muted">${escapeHtml(r.city || "")}${r.city && r.state ? ", " : ""}${escapeHtml(r.state || "")}</td>
+        <td><span class="program-tag program-${escapeHtml(r.program)}">${escapeHtml(r.program)}</span></td>
+        <td>${escapeHtml(topReason(r.score_reasons))}</td>
+        <td>
+          <span class="status-badge status-${escapeHtml(r.status)}">${escapeHtml(r.status)}</span>
+          ${r.status === "Resolved" ? '<span class="donot-pill">Do not call</span>' : ""}
+        </td>
+        <td class="muted" style="text-align:right;">${r.registry_id === expandedId ? "▲" : "▼"}</td>
+      </tr>
+    `);
+    if (r.registry_id === expandedId) {
+      rows.push(`<tr class="detail-row"><td colspan="7">${renderDetail(r)}</td></tr>`);
+    }
+  }
+  body.innerHTML = rows.join("");
+}
+
+/* ---------- Events ---------- */
+document.getElementById("leadsBody").addEventListener("click", e => {
+  const copyBtn = e.target.closest("[data-copy]");
+  if (copyBtn) {
+    const id = copyBtn.getAttribute("data-copy");
+    const r = leads.find(l => l.registry_id === id);
+    if (r) {
+      const text = `${r.company} (${r.city}, ${r.state})\nScore ${r.lead_score} — ${r.program} — Status: ${r.status}\nReasons: ${r.score_reasons}\nECHO: ${r.echo_url}`;
+      navigator.clipboard.writeText(text).then(() => showToast("Copied to clipboard"));
+    }
+    e.stopPropagation();
+    return;
+  }
+  if (e.target.closest("a")) return;
+  const row = e.target.closest("tr.lead-row");
+  if (!row) return;
+  const id = row.dataset.id;
+  expandedId = (expandedId === id) ? null : id;
+  render();
+});
+
+document.querySelectorAll("thead th[data-sort]").forEach(th => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    if (sortKey === key) sortDir = -sortDir;
+    else { sortKey = key; sortDir = (key === "lead_score") ? -1 : 1; }
+    render();
+  });
+});
+
+document.getElementById("filterState").addEventListener("change", render);
+document.getElementById("filterProgram").addEventListener("change", render);
+document.getElementById("filterScore").addEventListener("input", e => {
+  document.getElementById("filterScoreValue").textContent = e.target.value;
+  render();
+});
+document.getElementById("filterStatus").addEventListener("change", e => {
+  const chip = e.target.closest(".chip");
+  if (chip) chip.classList.toggle("active", e.target.checked);
+  render();
+});
+document.getElementById("filterSearch").addEventListener("input", render);
+
+document.getElementById("uploadBtn").addEventListener("click", () => {
+  document.getElementById("csvUpload").click();
+});
+document.getElementById("csvUpload").addEventListener("change", async e => {
+  const files = Array.from(e.target.files || []);
+  if (!files.length) return;
+  let newLeads = null, newEvents = null;
+  let leadFileName = "", eventFileName = "";
+  for (const f of files) {
+    const text = await f.text();
+    const rows = parseCSV(text);
+    if (!rows.length) continue;
+    const cols = Object.keys(rows[0]);
+    if (cols.includes("lead_score") || cols.includes("score_reasons")) {
+      newLeads = rows; leadFileName = f.name;
+    } else if (cols.includes("violation_id") || cols.includes("exceedance_pct") || cols.includes("violation_description") || cols.includes("parameter")) {
+      newEvents = rows; eventFileName = f.name;
+    }
+  }
+  if (newLeads) {
+    setLeads(newLeads, newEvents || [], leadFileName + (eventFileName ? " + " + eventFileName : ""), false);
+    showToast(`Loaded ${newLeads.length} leads` + (newEvents ? ` + ${newEvents.length} events` : ""));
+  } else if (newEvents) {
+    events = newEvents;
+    showToast(`Loaded ${newEvents.length} violation events (no leads file)`);
+    render();
+  } else {
+    showToast("CSV columns didn't match the expected pipeline output");
+  }
+  e.target.value = "";
+});
+
+document.getElementById("resetBtn").addEventListener("click", () => {
+  setLeads(SEED_LEADS, SEED_EVENTS, "Demo data", true);
+  showToast("Reset to demo data");
+});
+
+/* ---------- Init ---------- */
+setLeads(SEED_LEADS, SEED_EVENTS, "Demo data", true);
+</script>
+
+</body>
+</html>
