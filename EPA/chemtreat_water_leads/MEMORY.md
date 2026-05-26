@@ -167,6 +167,41 @@ months ago. We surface the lag in **four places** (CLI banner,
 output dir, README section). If you ever simplify this, keep at least
 two of the four. The duplication is on purpose.
 
+### Trap 7: EPA bot-block returns HTTP 200 + Error envelope
+
+ECHO has anti-robotic detection that trips around 25–30 rapid queries
+from one client. When it fires, the response is HTTP 200 with body
+`{"Error": {"ErrorMessage": "Your query has been identified as a
+robotic or programmed query..."}}` — no `Results` key at all. The
+block clears in ~5 seconds; sustained hammering extends it.
+
+Pre-fix this was indistinguishable from "no facility array AND no
+QID" in `_qid_workflow`, and the pipeline silently moved on, losing
+every state after the first. **As of 2026-05-22**, `_get` detects
+the envelope via `_looks_bot_blocked` and retries on
+`BOT_BLOCK_BACKOFF_SCHEDULE = (5, 15, 45)` before raising
+`EpaBotBlocked`. A shared `requests.Session` with a descriptive
+`User-Agent` reduces the block probability.
+
+### Trap 8: DFR returns a thin response under throttle
+
+`dfr_rest_services.get_dfr` (the per-facility drill-down) has its
+own throttle that returns HTTP 200 with a full `{"Results": {...}}`
+envelope but only ~1 top-level key instead of the usual ~55. A real
+"no violations" response still carries the full envelope, so key
+density distinguishes throttle from legitimate emptiness.
+
+Empirically, DFR throttles around call #15 at 0.5s pace. Once
+throttled, the recovery time is longer than the general bot-block.
+`fetch_sdwa_violation_events` uses `DFR_RETRY_BACKOFF_SCHEDULE = (5,
+15, 45)` matching the general bot-block schedule. If all retries
+exhaust, a loud WARNING fires so the caller (typically `pipeline.py`
+or `bulk_loader.py`) knows to second-pass.
+
+`pipeline.run` and `bulk_loader.run_bulk` both have a second-pass
+that catches the survivors of the first pass. End-of-run summary
+warns if final miss rate exceeds 5%.
+
 ---
 
 ## Sales relevance details (don't forget these)
@@ -332,9 +367,168 @@ instead of CamelCase). The `_bulk_to_api_shape()` function maps them so
 the same `scoring.score_facility()` function works for both. Don't break
 this mapping — the scorer is downstream of both paths.
 
+**Downloads use `requests`, not `urllib.request.urlretrieve`.** Stock
+macOS Python.framework installs ship with an empty OpenSSL trust store
+and trip `SSL: CERTIFICATE_VERIFY_FAILED` on `urlretrieve`. `requests`
+uses `certifi`'s bundle and works out of the box. Don't revert.
+
 Stream-parsing with `csv.DictReader` is intentional. The ECHO Exporter
 is 250 MB unzipped; loading into pandas takes ~2 GB RAM. Stream-parse
 keeps us under 100 MB and runs in similar time.
+
+### Bulk produces per-program shapes (not one shared dict)
+
+As of 2026-05-26, the bulk path emits one `(program, raw_dict)` per
+program a facility trips. `_bulk_to_program_shapes(row)` returns 0, 1,
+or 2 pairs depending on which signals fire. Each raw dict carries
+ONLY that program's canonical keys (CWA dict has no `Feas`/`SNC`/
+`QtrsWithVio`; SDWA dict has no `CWPFormalEaCnt`/`CWPSNCStatus`/
+`CWPQtrsWithNC`). See RATIONALE.md for the design discussion.
+
+**Why per-program rather than one shared dict.** The scoring rules
+use Python `or` chains: `f.get("CWPFormalEaCnt") or f.get("Feas")`.
+The pre-refactor `_bulk_to_api_shape` produced
+`{"CWPFormalEaCnt": "0", "Feas": "5"}` — Python evaluates `"0" or "5"`
+as `"0"` (truthy), so the SDWA value never reached the scorer. Every
+bulk SDWA lead with a clean CWA side was 40+ points light. The
+per-program split eliminates the masking class entirely. Pinned by
+`tests/test_program_shapes.py` and `tests/test_scoring_via_bulk.py`.
+
+**SDWA bulk has limited facility-level signals.** Verified empirically
+against the ECHO Exporter header: only `SDWA_SNC_FLAG`,
+`SDWA_FORMAL_ACTION_COUNT`, `SDWA_INFORMAL_COUNT`, and the verbose
+`SDWA_COMPLIANCE_STATUS` text are present. No quarters-with-vio,
+no Pb/Cu/lead-copper flags at this level. The chronic rule cannot
+fire for SDWA from bulk-only data — chronic / lead-copper detection
+for SDWA needs event data (from the SDWA bulk events file or the API
+fine-comb fallback). Documented behavior, not a bug.
+
+### Event normalization
+
+`_normalize_bulk_sdwa_event` / `_normalize_bulk_npdes_event` map
+bulk's short-form `violation_category` (`"MCL"`, `"TreatmentTechnique"`)
+to the API's verbose strings (`"Maximum Contaminant Level Violation"`,
+`"Treatment Technique Violation"`) so `scoring.EVENT_RULES`' substring
+matches fire. They also normalize status vocabulary
+(`U`/`UNADDRESSED`/`OPEN` → `Unaddressed`, `RTC`/`RETURNED TO
+COMPLIANCE` → `Resolved`, etc.) and rename keys to schema columns
+(`permit_id` → `npdes_id`, `pwsid` → `source_id`).
+
+### Bulk event joins fall back to permit/PWSID
+
+`stream_npdes_violations` and `stream_sdwa_violations` accept three
+lookup arguments: `registry_id_set`, the program's natural identifier
+set (`permit_id_set` / `pwsid_set`), and a reverse map back to
+RegistryID. Events match by REGISTRY_ID when present; otherwise by
+NPDES_ID (CWA) or PWSID (SDWA). On a fallback match, the lead's
+RegistryID is backfilled onto the event before persistence so
+snapshot's `registry_id` column is populated and downstream
+`events_by_key` joins work.
+
+**Why the fallback is the dominant path.** Bulk violation rows in
+practice carry NO `REGISTRY_ID` — verified empirically against
+`NPDES_SE/PS/CS_VIOLATIONS.csv` and `SDWA_VIOLATIONS_ENFORCEMENT.csv`
+headers. The REGISTRY_ID-only filter (pre-refactor) dropped every
+bulk event silently. Pinned by `tests/test_event_joins.py`.
+
+### Bulk NPDES file selection
+
+`stream_npdes_violations` explicitly targets `NPDES_SE_VIOLATIONS.csv`
+(single-event effluent), `NPDES_PS_VIOLATIONS.csv` (permit-schedule
+milestones), and `NPDES_CS_VIOLATIONS.csv` (compliance-schedule
+events). The pre-refactor selector took the first file matching
+`"VIOLATION"` — which was `NPDES_VIOLATION_ENFORCEMENTS.csv`, a join
+table with no NPDES_ID column. Wrong file; joins always returned
+empty. Documented in RATIONALE.md.
+
+Bulk NPDES violation files do NOT carry the per-DMR `parameter` /
+`limit_value` / `dmr_value` / `exceedance_pct` columns that the API
+path's `get_effluent_chart` returns. Those fields are left None in
+bulk-derived events and render as empty cells in
+`violation_events.csv`. Use the API path (or the fine-comb fallback)
+when you need that level of detail.
+
+### Phase-2 augmentation
+
+Runs in `run_bulk` after events load: re-scores via
+`scoring.score_facility(raw, events)`, computes `outreach_posture`
+and `compute_tags`. Mirrors `pipeline.run`'s block exactly. Factored
+into `_augment_leads(leads, events, touched_keys=None)` so the same
+function services the initial pass (all leads) and the post-fine-comb
+re-run (only touched leads).
+
+### API fine-comb fallback (three independent triggers)
+
+After bulk events load and phase-2 augmentation, `run_bulk` calls
+`_drilldown_candidates(leads, prior_scores)` to pick which leads get
+the API fine-comb drill-down. Three OR'd triggers:
+
+1. `lead_score >= EVENT_DRILLDOWN_MIN_SCORE` — absolute threshold.
+2. `(registry_id, program) not in prior_scores` — newly discovered
+   facility. Gets one drill per run regardless of score so the
+   "today's diff" view always has per-event detail on new leads.
+3. `lead_score > prior_scores[key] + 10` — score jumped by more than
+   10. Captures enforcement-trajectory changes regardless of
+   absolute score.
+
+`prior_scores` is loaded once at the top of `run_bulk` via
+`_load_prior_scores(db_path)`, before any upsert, in its own
+`snapshot.open_db` context. Leads that already have events from the
+bulk feed (`outreach_posture != "no_events"`) are excluded from the
+candidate set.
+
+Drills via `pipeline._drill_cwa` / `pipeline._drill_sdwa` (which carry
+the bot-block retry from `echo_client._get`). Re-runs phase-2 only
+for touched leads.
+
+This means a single weekly/bi-weekly `bulk_loader` run gets you
+nationwide coverage AND per-event drill-down for high-value /
+newly-discovered / score-jumped leads, without sales having to
+manually fire the API pipeline as a follow-up.
+
+### `--no-events` is fully offline
+
+Both the bulk event load AND the API fine-comb fallback are wrapped
+in a single `if include_events:` block in `run_bulk`. Zero EPA calls,
+zero event-zip downloads. Pinned by `tests/test_no_events_flag.py`
+which patches `_download_cached`, `_drill_cwa`, `_drill_sdwa`,
+`stream_npdes_violations`, and `stream_sdwa_violations` and asserts
+none of them are called when `include_events=False`. Pre-refactor,
+the fine-comb block ran unconditionally — silent network leak.
+
+### `out/run_health.json` — every run
+
+Added 2026-05-26. Both `bulk_loader.run_bulk` and `pipeline.run` write
+a JSON snapshot of the run at end-of-pipeline. Single file, overwritten
+each run (matches the `all_leads.csv` / `violation_events.csv`
+overwrite pattern). The viewer's "Run Health" tab consumes it.
+
+Contents (schema_version = 1):
+
+- `generated_at`, `command`, `states_filter`, `include_events`
+- `totals` — leads (per program), events, new_facilities, newly_snc,
+  new_violations
+- `drilldown` — candidates queued, cwa/sdwa events recovered, count
+  still missing after API retries
+- `high_score_no_events_by_state` — per-state count of leads scoring
+  ≥ `EVENT_DRILLDOWN_MIN_SCORE` with `outreach_posture=no_events`.
+  Drives the viewer's "Coverage gap → run `pipeline --states X`"
+  suggestion card.
+- `depth.cwa_events_with_dmr_detail` / `cwa_events_total` — ratio of
+  events with per-DMR numbers vs. just violation codes. Highlights
+  where bulk's NPDES events lack depth.
+- `thresholds` — current values of `EVENT_DRILLDOWN_MIN_SCORE` (50)
+  and `SECONDARY_DRILLDOWN_MIN_SCORE` (20).
+- `warnings` — every WARNING-and-above log record emitted during the
+  run. Captured via `_health.WarningCollector`, a logging.Handler
+  installed on the `chemtreat` logger tree at run start and removed
+  in a `try/finally` so it doesn't leak into pytest/unittest state.
+
+Helpers live in `_health.py` (separate module to avoid the
+`bulk_loader → pipeline` import cycle that would otherwise result if
+both modules imported shared helpers). Schema is versioned; the
+viewer's `setHealth()` refuses to render unknown versions to prevent
+silent staleness when keys change.
 
 ---
 

@@ -264,6 +264,11 @@ Three primary outputs per run:
   `new_violations`). This is what the sales team should actually look
   at each morning — the standing inventory has dozens of inches of
   scroll, the changeset is the few rows that matter today.
+- `run_health.json` — structured snapshot of the run (totals, drill-down
+  stats, per-state coverage gaps, warnings). The viewer's Run Health
+  tab consumes this to surface signals (terminal warnings, coverage
+  gaps, suggested follow-up commands) to non-technical readers who
+  never look at the log. Single file, overwritten each run.
 
 A separate viewer at `../chemtreat_water_leads_viewer/index.html` is a
 single-page HTML app for browsing these CSVs. It reads
@@ -340,6 +345,17 @@ python -m chemtreat_water_leads.bulk_loader \
     --out ./out --db ./snapshot.sqlite --cache ./cache
 ```
 
+The bulk path emits one row per (facility, program) — a facility that
+trips both CWA and SDWA signals appears as two rows with the same
+`registry_id` but different `program` values. Event joins fall back
+to NPDES_ID (CWA) or PWSID (SDWA) when REGISTRY_ID is blank on bulk
+violation rows (which is the common case). `--no-events` makes the
+run fully offline — zero EPA API calls, zero event-zip downloads.
+
+See `RATIONALE.md` for the design choices behind per-program shapes,
+the three-trigger drill-down candidate set, and the SQLite-as-source-
+of-truth contract.
+
 See **`COMMANDS.md`** for the full command reference with realistic
 time estimates, first-run vs later-run differences, daily-cron patterns,
 and ad-hoc SQLite queries for inspecting the snapshot.
@@ -360,14 +376,24 @@ chemtreat_water_leads/
 ├── snapshot.py       # SQLite diff/state — extend schema as new fields land
 ├── pipeline.py       # API-based orchestration (regional / state pulls)
 ├── bulk_loader.py    # CSV-based orchestration (nationwide pulls)
+├── _health.py        # Run-health JSON writer + WarningCollector log handler
 ├── README.md         # Methodology — you are here
+├── STARTING_GUIDE.md # First-time guide for sales-facing users
 ├── COMMANDS.md       # Practical run patterns & time estimates
+├── DIAGRAM.md        # State map of bulk vs API depths
 ├── MEMORY.md         # Field-name traps & the silent-failure trail
+├── RATIONALE.md      # Design decisions behind the bulk path
 └── TODO.md           # Scoring/output follow-ups (D–G from the assessment)
 
 ../chemtreat_water_leads_viewer/
 ├── index.html        # Single-page CSV viewer
 └── RATIONALE.md      # Viewer design notes & gap list
+```
+
+Tests live at `EPA/tests/`. Run with:
+
+```bash
+cd EPA && ../.venv/bin/python -m unittest discover -s tests -t .
 ```
 
 **Read MEMORY.md before editing `echo_client.py`.** It documents ten

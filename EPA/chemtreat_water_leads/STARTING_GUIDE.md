@@ -1,0 +1,249 @@
+# Starting Guide
+
+For a sales rep using the lead generator for the first time. Assumes
+someone has set up Python and the project's dependencies; if you can
+type the commands below into a Terminal window, you're set.
+
+---
+
+## What this tool does
+
+It pulls EPA water-violation data, scores facilities for ChemTreat
+relevance, and produces a ranked inventory of leads you can browse in
+a viewer. Every score comes with a human-readable reason
+("Significant Non-Complier, 4 quarters in non-compliance, $48k recent
+penalty") — there is no ML black box.
+
+---
+
+## Acronyms you'll see
+
+**EPA programs and data terms:**
+
+| Acronym | Stands for | What it means here |
+|---|---|---|
+| **EPA** | Environmental Protection Agency | The federal agency that publishes the data we pull. |
+| **CWA** | Clean Water Act | The federal law covering industrial **wastewater** discharges. CWA leads = industrial facilities (refineries, paper mills, power plants, food & beverage, etc.). |
+| **SDWA** | Safe Drinking Water Act | The federal law covering **drinking-water systems**. SDWA leads = public water utilities, municipal systems, schools, mobile-home parks with their own well, etc. |
+| **NPDES** | National Pollutant Discharge Elimination System | The permit program under CWA. An NPDES permit number identifies a specific industrial discharge point. |
+| **DMR** | Discharge Monitoring Report | The monthly report a CWA facility files showing what they measured in their discharge. DMR data is where exceedances (over-the-limit readings) show up. |
+| **SNC** | Significant Non-Complier | EPA's red-flag designation for facilities with serious, recurring violations. The strongest single signal in our scoring. |
+| **MCL** | Maximum Contaminant Level | A health-based ceiling on a specific contaminant in drinking water (lead, nitrate, etc.). MCL violations are high-relevance SDWA signals. |
+| **TT** | Treatment Technique | A required treatment process for a drinking-water system (filtration, disinfection). TT violations mean the treatment is failing — the single highest-relevance category for ChemTreat. |
+| **ECHO** | Enforcement and Compliance History Online | EPA's public website at `echo.epa.gov`. Every facility row in the viewer has a link to its ECHO page for verification. |
+
+**Computer/technical terms:**
+
+| Acronym | Stands for | What it means here |
+|---|---|---|
+| **API** | Application Programming Interface | A way for our code to query EPA's live data directly. Slower than bulk downloads but produces richer per-event detail. |
+| **CSV** | Comma-Separated Values | A text file you can open in Excel. The viewer reads these to display the inventory. |
+| **JSON** | JavaScript Object Notation | A structured text file format. `run_health.json` is the only one you'll see. |
+| **DB** | Database | The `snapshot.sqlite` file that stores the running history of every facility we've ever seen. Don't delete it. |
+
+Two ways to pull data:
+
+- **`bulk_loader`** — covers all 50 states + DC + territories
+  nationwide via EPA's weekly bulk CSV downloads. ~15-30 min total
+  per run. This is what you'll run most weeks.
+- **`pipeline --states X,Y,Z`** — calls the live EPA API per state.
+  Slower per state but produces richer per-event detail (which
+  pollutant, what the limit was, by how much they exceeded it). Use
+  this as a follow-up on specific states where bulk's depth isn't
+  enough.
+
+---
+
+## First run, from scratch
+
+From a Terminal window inside the project's `EPA/` folder:
+
+```bash
+../.venv/bin/python -m chemtreat_water_leads.bulk_loader \
+    --out ./out \
+    --db ./snapshot.sqlite \
+    --cache ./cache
+```
+
+That's the whole command. **No `--states` flag means nationwide** —
+every state, DC, and territory. The first time you run it, EPA's
+weekly bulk files download (about 830 MB total, cached locally for 7
+days afterward).
+
+The run takes ~15-30 minutes. Inside that one process it:
+
+1. Scans EPA's nationwide facility list (~1.5M rows) and keeps the
+   ones with water-violation signals.
+2. Joins per-event details from EPA's bulk NPDES and SDWA event files.
+3. For high-scoring and newly-discovered leads, calls EPA's live API
+   to pull the richer per-event detail bulk doesn't carry.
+4. Saves everything to `snapshot.sqlite` and dumps a clean set of CSVs
+   into `out/`.
+
+You don't invoke any of those stages separately — one command does
+the whole chain.
+
+---
+
+## What lands in `out/` after the run
+
+```
+out/
+├── READ_ME_FIRST.txt              lag warning — read first
+├── all_leads.csv                  ← upload to viewer
+├── violation_events.csv           ← upload to viewer
+├── run_health.json                ← upload to viewer
+├── new_facilities_YYYYMMDD.csv    dated, "what's new today"
+├── newly_snc_YYYYMMDD.csv         dated, "newly Significant Non-Complier"
+└── new_violations_YYYYMMDD.csv    dated, "new events today"
+```
+
+The three files marked **upload to viewer** are the ones to drop into
+the viewer page. The dated `new_*` files are mostly empty on a first
+run since there's no prior baseline to diff against — they become
+useful on weekly re-runs.
+
+---
+
+## A note on how drill-down picks leads
+
+You don't have to think about this on a first run, but it helps to
+know why some leads end up with rich event detail and others don't.
+
+Inside the bulk run, every facility's events go through two passes:
+
+1. **Bulk drill-down (free, applies to all leads).** The bulk NPDES
+   and SDWA event files are streamed and joined to every kept
+   facility. If the bulk feed had events for that facility, they're
+   attached. This is automatic and adds no time per lead.
+
+2. **API fine-comb (selective).** After the bulk pass, the live EPA
+   API is called for the leads that matter most:
+   - Lead score ≥ 50 — always drilled
+   - Newly-discovered AND score ≥ 20 — drilled (this catches every
+     lead on a first-from-scratch run)
+   - Score jumped > 10 since the prior run AND score ≥ 20 — drilled
+   - Already has events from the bulk pass — **skipped**
+   - Score below 20 — **skipped** (too low to act on regardless)
+
+So nothing gets "flagged for later." The deep drill runs *during* the
+bulk run on the leads that warrant it. If a lead ends up with no
+event detail after the run, it's because (a) the bulk feed had
+nothing AND (b) either the API attempt also failed (bot-block, EPA
+throttle) or the lead scored too low to qualify.
+
+The Run Health tab in the viewer surfaces case (a) plus failed-API
+cases so you know which states might be worth a follow-up `pipeline`
+run.
+
+---
+
+## Opening the viewer
+
+Open `chemtreat_water_leads_viewer/index.html` in any browser
+(Chrome, Safari, Firefox — no internet required).
+
+1. Click **Upload files** at the top right.
+2. Select **all three** files at once: `all_leads.csv`,
+   `violation_events.csv`, `run_health.json`. On Mac, cmd-click each
+   to select multiple in the file picker.
+3. The viewer auto-detects each file by its columns/schema. Pick
+   them in any order.
+
+You'll land on the Inventory tab by default. The Run Health tab is to
+its right.
+
+---
+
+## What to look at first, every run
+
+### 1. Run Health tab
+
+This is where you find out whether the run's data is trustworthy and
+where the gaps are.
+
+- The **red badge** on the tab is a count of "things worth attention"
+  this run. If it's high, click in.
+- The **Coverage gap** card flags high-scoring leads with no event
+  detail, broken down by state. If it says something like "12
+  high-score leads in TX/LA/PA have no event detail," that's the cue
+  to run a follow-up API pull on those states. The card gives you a
+  copy-pasteable command.
+- The **Depth gap** card flags CWA leads where bulk gave us only
+  violation codes, not specific pollutant readings. Same fix —
+  `pipeline --states ...`.
+- The **Run warnings** panel lists any EPA bot-block or throttle
+  errors. If it's empty, the run was clean.
+
+### 2. Inventory tab
+
+Standard browsing:
+
+- Default sort is by score, highest first.
+- Filter to your territory in the **State** dropdown.
+- Click any row to expand. You'll see the full score reasoning, the
+  underlying violation events, and a direct link to EPA's facility
+  detail page.
+- **Resolved (green-tinted)** rows are "they fixed it — do not
+  cold-call." The Status filter hides these by default.
+- A **Newly SNC** badge means the facility just crossed into
+  Significant Non-Complier status since the last run. These are the
+  freshest signal sales has.
+
+---
+
+## Want richer detail on a specific territory?
+
+If the Run Health tab flags a gap, follow the suggested command.
+Example:
+
+```bash
+../.venv/bin/python -m chemtreat_water_leads.pipeline \
+    --states TX,LA,PA \
+    --out ./out \
+    --db ./snapshot.sqlite
+```
+
+That takes 5-20 minutes per state and adds:
+
+- Broader SDWA inventory (every system with any open violation, not
+  just SNC/formal-action ones — roughly 10× more systems per state).
+- Full per-DMR detail on CWA events (which pollutant, the permitted
+  limit, the measured value, the exceedance percent).
+
+It updates the same DB and CSVs. Re-upload them to the viewer to see
+the deeper detail.
+
+---
+
+## Weekly refresh routine
+
+Seven days later, run the same `bulk_loader` command — EPA refreshes
+the bulk files weekly, so the cache invalidates automatically:
+
+```bash
+../.venv/bin/python -m chemtreat_water_leads.bulk_loader \
+    --out ./out --db ./snapshot.sqlite --cache ./cache
+```
+
+This time the `new_*_YYYYMMDD.csv` files are the interesting ones —
+they hold only what changed since the prior run. The `all_leads.csv`,
+`violation_events.csv`, and `run_health.json` are rewritten with the
+current state; re-upload to the viewer the same way.
+
+**Critical rule:** never delete `snapshot.sqlite`. It's the diff
+baseline. If you delete it, the next run treats every facility as
+"new again" and the delta files become useless.
+
+---
+
+## Three rules of thumb
+
+1. **EPA data lags 30-90 days.** SDWA is ~90 days; CWA is ~30-45.
+   Verify status on the EPA ECHO page before any outreach. The
+   "Resolved — do not call" filter exists for this reason.
+2. **Score is heuristic.** 78 vs 82 is noise; 78 vs 40 is signal.
+   The color tiers in the viewer reflect this.
+3. **Read the Run Health tab first, Inventory second.** Health tells
+   you whether the data is trustworthy and where the gaps are.
+   Inventory is where you act on it.

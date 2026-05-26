@@ -29,7 +29,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import echo_client, scoring, snapshot
+from . import _health, echo_client, scoring, snapshot
 
 log = logging.getLogger("chemtreat")
 
@@ -254,6 +254,20 @@ def _write_lag_notice(out_dir: Path) -> None:
 def run(states: list[str], out_dir: Path, db_path: Path) -> None:
     print(LAG_BANNER)
 
+    # Capture WARNING-and-above for run_health.json (bot-block, throttle,
+    # drill-down miss summary). Removed in finally so the handler doesn't
+    # leak into subsequent tests/processes sharing the root logger.
+    warning_collector = _health.WarningCollector()
+    chemtreat_logger = logging.getLogger("chemtreat")
+    chemtreat_logger.addHandler(warning_collector)
+    try:
+        _run_inner(states, out_dir, db_path, warning_collector)
+    finally:
+        chemtreat_logger.removeHandler(warning_collector)
+
+
+def _run_inner(states: list[str], out_dir: Path, db_path: Path,
+               warning_collector: "_health.WarningCollector") -> None:
     # ---- 1. Pull and score everything in territory --------------------
     leads: list[dict] = []
     for st in states:
@@ -398,6 +412,23 @@ def run(states: list[str], out_dir: Path, db_path: Path) -> None:
     _write_csv(out_dir / f"new_facilities_{today}.csv", fac_diff["new"])
     _write_csv(out_dir / f"newly_snc_{today}.csv", fac_diff["newly_snc"])
     _write_csv(out_dir / f"new_violations_{today}.csv", viol_diff["new"])
+
+    health_path = _health.write_run_health(
+        out_dir,
+        command="pipeline",
+        states=states,
+        include_events=True,
+        run_start_ts=run_start_ts,
+        leads=leads,
+        events=events,
+        fac_diff=fac_diff,
+        viol_diff=viol_diff,
+        drilldown_stats=None,
+        warnings=warning_collector.records,
+        event_drilldown_min_score=EVENT_DRILLDOWN_MIN_SCORE,
+        secondary_drilldown_min_score=EVENT_DRILLDOWN_MIN_SCORE,
+    )
+    log.info("Wrote run health to %s", health_path)
 
     log.info("Done. %d new facilities, %d newly SNC, %d new violation events.",
              len(fac_diff["new"]), len(fac_diff["newly_snc"]),

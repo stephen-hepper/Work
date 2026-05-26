@@ -154,6 +154,192 @@
     margin: 0 auto;
   }
 
+  /* Tabs */
+  .tabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 18px;
+  }
+  .tab-btn {
+    appearance: none;
+    background: transparent;
+    border: none;
+    border-bottom: 3px solid transparent;
+    padding: 10px 18px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--muted);
+    cursor: pointer;
+    position: relative;
+  }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+  .tab-btn .tab-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 7px;
+    border-radius: 10px;
+    background: var(--danger);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 600;
+    vertical-align: middle;
+  }
+  .tab-btn .tab-badge.calm { background: var(--muted); }
+  .tab-btn .tab-badge.hidden { display: none; }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+
+  /* Run-health panels */
+  .health-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  .health-grid.full { grid-template-columns: 1fr; }
+  .health-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 18px 20px;
+  }
+  .health-card.alert { border-left: 4px solid var(--danger); }
+  .health-card.warn  { border-left: 4px solid var(--orange); }
+  .health-card.info  { border-left: 4px solid var(--accent); }
+  .health-card.ok    { border-left: 4px solid var(--green); }
+  .health-card h3 {
+    margin: 0 0 4px 0;
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .health-card .subtitle {
+    color: var(--muted);
+    font-size: 12.5px;
+    margin-bottom: 12px;
+  }
+  .health-card .big-number {
+    font-size: 32px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 4px;
+  }
+  .health-card.alert .big-number { color: var(--danger); }
+  .health-card.warn  .big-number { color: var(--orange); }
+  .health-card.info  .big-number { color: var(--accent); }
+  .health-card.ok    .big-number { color: var(--green); }
+  .health-card ul {
+    margin: 8px 0 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  .health-card li {
+    padding: 6px 0;
+    border-bottom: 1px solid #f0f2f5;
+    font-size: 13px;
+    display: flex;
+    justify-content: space-between;
+  }
+  .health-card li:last-child { border-bottom: none; }
+  .health-card li .state-code {
+    font-weight: 600;
+    color: var(--text);
+  }
+  .health-card li .state-count {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .health-action {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid #f0f2f5;
+  }
+  .health-action .label {
+    font-size: 12px;
+    text-transform: uppercase;
+    color: var(--muted);
+    letter-spacing: 0.04em;
+    margin-bottom: 6px;
+  }
+  .health-cmd {
+    background: #1d2330;
+    color: #d3dae9;
+    border-radius: 5px;
+    padding: 10px 12px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin: 0;
+    position: relative;
+  }
+  .health-cmd .copy-cmd {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    background: #2d3340;
+    color: #d3dae9;
+    border: 1px solid #444;
+    border-radius: 3px;
+    padding: 2px 8px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .health-cmd .copy-cmd:hover { background: #3a4252; }
+  .health-warning-list {
+    max-height: 280px;
+    overflow-y: auto;
+    border: 1px solid #f0f2f5;
+    border-radius: 5px;
+    padding: 8px 10px;
+    background: #fafbfc;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11.5px;
+    line-height: 1.5;
+  }
+  .health-warning-list .empty {
+    color: var(--muted);
+    font-family: inherit;
+    font-style: italic;
+  }
+  .health-meta {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr;
+    gap: 14px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin-bottom: 16px;
+  }
+  .health-meta .label {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .health-meta .value {
+    font-size: 15px;
+    font-weight: 600;
+    margin-top: 2px;
+  }
+  .health-empty {
+    background: var(--panel);
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    padding: 40px 30px;
+    text-align: center;
+    color: var(--muted);
+  }
+  .health-empty h3 {
+    margin: 0 0 8px 0;
+    color: var(--text);
+    font-weight: 600;
+  }
+
   /* Summary tiles */
   .tiles {
     display: grid;
@@ -544,7 +730,7 @@
   <div>
     <strong>Demo data &mdash; not real facilities.</strong>
     Company names, registry IDs, and permit numbers are fictional, so the "Open in EPA ECHO" link is disabled.
-    Click <strong>Upload CSV(s)</strong> above and select <code>all_leads.csv</code> <em>and</em> <code>violation_events.csv</code> together (cmd/ctrl-click both in the file picker) &mdash; the viewer detects each by its columns, so the order you pick doesn't matter. You can also upload just one.
+    Click <strong>Upload files</strong> above and select <code>all_leads.csv</code>, <code>violation_events.csv</code>, and (optionally) <code>run_health.json</code> together &mdash; the viewer detects each by its columns/schema, so the order you pick doesn't matter. The JSON populates the <em>Run Health</em> tab.
   </div>
 </div>
 
@@ -558,13 +744,23 @@
     </div>
   </div>
   <div class="header-actions">
-    <input type="file" id="csvUpload" class="file-input" accept=".csv" multiple />
-    <button class="btn" id="uploadBtn" title="Select all_leads.csv and violation_events.csv at the same time (cmd/ctrl-click both) — order doesn't matter, the viewer detects each by its columns.">Upload CSV(s)&hellip;</button>
+    <input type="file" id="csvUpload" class="file-input" accept=".csv,.json" multiple />
+    <button class="btn" id="uploadBtn" title="Select all_leads.csv, violation_events.csv, and (optionally) run_health.json at the same time. Order doesn't matter — the viewer detects each by its columns/schema.">Upload files&hellip;</button>
     <button class="btn" id="resetBtn">Reset to demo data</button>
   </div>
 </div>
 
 <div class="body">
+
+  <div class="tabs" role="tablist">
+    <button class="tab-btn active" id="tabInventoryBtn" data-tab="inventory" role="tab">Inventory</button>
+    <button class="tab-btn" id="tabHealthBtn" data-tab="health" role="tab">
+      Run Health
+      <span class="tab-badge hidden" id="healthBadge">0</span>
+    </button>
+  </div>
+
+  <div class="tab-pane active" id="tabInventory" role="tabpanel">
 
   <div class="tiles">
     <div class="tile">
@@ -640,6 +836,18 @@
       No leads match the current filters.
     </div>
   </div>
+
+  </div><!-- /tabInventory -->
+
+  <div class="tab-pane" id="tabHealth" role="tabpanel">
+    <div id="healthBody">
+      <div class="health-empty">
+        <h3>No run health data loaded</h3>
+        <p>To see this tab populated, upload <code>run_health.json</code> from your <code>out/</code> folder alongside <code>all_leads.csv</code>. The file is produced automatically at the end of every <code>bulk_loader</code> or <code>pipeline</code> run.</p>
+        <p>This tab flags coverage and depth gaps from the most recent run and suggests follow-up commands to get richer detail.</p>
+      </div>
+    </div>
+  </div><!-- /tabHealth -->
 
 </div>
 
@@ -916,11 +1124,13 @@ const SEED_EVENTS = [
 /* ---------- State ---------- */
 let leads = [];
 let events = [];
+let health = null;        // run_health.json blob, when uploaded
 let sortKey = "lead_score";
 let sortDir = -1;
 let expandedId = null;
 let dataSource = "demo";
 let isDemoData = true;
+let activeTab = "inventory";
 
 /* ---------- Helpers ---------- */
 function scoreClass(s) {
@@ -1050,6 +1260,9 @@ function setLeads(newLeads, newEvents, sourceLabel, isDemo) {
   expandedId = null;
   populateStateFilter();
   render();
+  updateHealthBadge();
+  // If user is currently on Health tab, refresh it too.
+  if (activeTab === "health") renderHealth();
 }
 
 function populateStateFilter() {
@@ -1196,6 +1409,304 @@ function renderDetail(r) {
   </div>`;
 }
 
+/* ---------- Run Health tab ---------- */
+
+function setHealth(data) {
+  // Refuse unknown schema versions so we don't render stale fields silently.
+  if (!data || data.schema_version !== 1) {
+    showToast("run_health.json has unknown schema_version; ignoring");
+    return;
+  }
+  health = data;
+  renderHealth();
+}
+
+function escAttr(s) { return String(s == null ? "" : s).replace(/"/g, "&quot;"); }
+
+function fmtDate(iso) {
+  if (!iso) return "—";
+  // Accept "YYYY-MM-DDTHH:MM:SS" or full ISO; render in viewer's locale.
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  return d.toLocaleString();
+}
+
+function commandFor(states) {
+  if (!states || !states.length) return null;
+  return `python -m chemtreat_water_leads.pipeline \\\n    --states ${states.join(",")} \\\n    --out ./out --db ./snapshot.sqlite`;
+}
+
+function cmdBlock(cmd) {
+  if (!cmd) return "";
+  return `<pre class="health-cmd">${escapeHtml(cmd)}<button class="copy-cmd" data-cmd="${escAttr(cmd)}">copy</button></pre>`;
+}
+
+function renderHealth() {
+  const root = document.getElementById("healthBody");
+  if (!health) {
+    // Compute a best-effort view from CSVs alone — even without
+    // run_health.json the user can still see coverage gaps that the
+    // CSVs themselves can show.
+    if (!leads.length) {
+      root.innerHTML = `
+        <div class="health-empty">
+          <h3>No run health data loaded</h3>
+          <p>Upload <code>all_leads.csv</code>, <code>violation_events.csv</code>, and
+          <code>run_health.json</code> from your <code>out/</code> folder. The JSON file is
+          produced automatically at the end of every <code>bulk_loader</code> or
+          <code>pipeline</code> run.</p>
+        </div>`;
+      updateHealthBadge();
+      return;
+    }
+    // Fall through: render with health = null but using CSV-derived signals.
+  }
+
+  const h = health || {};
+  const totals = h.totals || {};
+  const drill = h.drilldown || {};
+  const depth = h.depth || {};
+  const thresholds = h.thresholds || { event_drilldown_min_score: 50 };
+  const minScore = thresholds.event_drilldown_min_score;
+
+  // Compute by-state high-score no-events from CURRENT leads (so the
+  // numbers stay in sync with what the user filters in Inventory).
+  // Falls back to health's pre-computed map if no leads are loaded.
+  let byState = {};
+  if (leads.length) {
+    for (const L of leads) {
+      if ((L.lead_score || 0) < minScore) continue;
+      if (L.status !== "NoEvents") continue;
+      const st = L.state || "?";
+      byState[st] = (byState[st] || 0) + 1;
+    }
+  } else if (h.high_score_no_events_by_state) {
+    byState = h.high_score_no_events_by_state;
+  }
+  const stateRows = Object.entries(byState).sort((a, b) => b[1] - a[1]);
+  const highNoEventsTotal = stateRows.reduce((s, [, n]) => s + n, 0);
+  const topStates = stateRows.slice(0, 5).map(([, n]) => n).reduce((a, b) => a + b, 0);
+  const topStateCodes = stateRows.slice(0, 5).map(([s]) => s);
+
+  // Depth gap: CWA events that lack per-DMR detail (bulk doesn't carry it).
+  let cwaWith = depth.cwa_events_with_dmr_detail;
+  let cwaTotal = depth.cwa_events_total;
+  if (events.length) {
+    let w = 0, t = 0;
+    for (const e of events) {
+      if (e.program !== "CWA") continue;
+      t += 1;
+      if (e.parameter && e.limit_value !== null && e.limit_value !== "") w += 1;
+    }
+    cwaWith = w; cwaTotal = t;
+  }
+  const cwaMissingDmr = (cwaTotal || 0) - (cwaWith || 0);
+
+  // All-resolved cluster: leads with events but every event Resolved/Archived.
+  // Computed from CSVs since it's a tag column.
+  let onlyResolved = 0;
+  for (const L of leads) {
+    if (L.tag_only_resolved_events === true ||
+        L.tag_only_resolved_events === "True" ||
+        L.tag_only_resolved_events === "true") onlyResolved += 1;
+  }
+
+  const warnings = h.warnings || [];
+
+  // ---- Build cards ----
+  const cards = [];
+
+  // Meta band
+  const metaPieces = [
+    { label: "Last refresh", value: fmtDate(h.generated_at) },
+    { label: "Command", value: h.command
+        ? (h.command + (h.include_events === false ? " (no events)" : ""))
+        : "—" },
+    { label: "Territory", value: h.states_filter && h.states_filter.length
+        ? h.states_filter.join(", ") : "nationwide" },
+    { label: "Total leads", value: (totals.leads != null ? totals.leads : leads.length).toLocaleString()
+        + (totals.leads_cwa != null
+           ? ` (${totals.leads_cwa} CWA + ${totals.leads_sdwa} SDWA)`
+           : "") },
+  ];
+  const metaHtml = `
+    <div class="health-meta">
+      ${metaPieces.map(p => `
+        <div>
+          <div class="label">${escapeHtml(p.label)}</div>
+          <div class="value">${escapeHtml(String(p.value))}</div>
+        </div>
+      `).join("")}
+    </div>`;
+
+  // Coverage gap card: high-score leads with no event detail
+  if (highNoEventsTotal > 0) {
+    const topPct = highNoEventsTotal ? Math.round(100 * topStates / highNoEventsTotal) : 0;
+    cards.push(`
+      <div class="health-card alert">
+        <h3>Coverage gap: ${highNoEventsTotal} high-score lead${highNoEventsTotal === 1 ? "" : "s"} with no event detail</h3>
+        <div class="subtitle">Lead scored ≥ ${minScore} but the bulk feed had no events for it and the API fine-comb either couldn't reach it or hit a throttle.</div>
+        <div class="big-number">${highNoEventsTotal}</div>
+        <ul>
+          ${stateRows.slice(0, 8).map(([s, n]) =>
+            `<li><span class="state-code">${escapeHtml(s)}</span><span class="state-count">${n}</span></li>`
+          ).join("")}
+          ${stateRows.length > 8
+            ? `<li><span class="state-code muted">… and ${stateRows.length - 8} more states</span></li>`
+            : ""}
+        </ul>
+        <div class="health-action">
+          <div class="label">Suggested next step (${topPct}% covered)</div>
+          ${cmdBlock(commandFor(topStateCodes))}
+        </div>
+      </div>`);
+  } else {
+    cards.push(`
+      <div class="health-card ok">
+        <h3>Coverage looks good</h3>
+        <div class="subtitle">Every lead scoring ≥ ${minScore} has at least some event-level detail attached.</div>
+        <div class="big-number">0</div>
+        <div class="subtitle">leads missing per-event data</div>
+      </div>`);
+  }
+
+  // Depth gap card: CWA missing per-DMR detail
+  if (cwaTotal > 0 && cwaMissingDmr > 0) {
+    const pct = Math.round(100 * cwaMissingDmr / cwaTotal);
+    cards.push(`
+      <div class="health-card warn">
+        <h3>Depth gap: ${cwaMissingDmr} CWA events lack per-DMR numbers</h3>
+        <div class="subtitle">Bulk NPDES files don't carry <code>parameter</code> / <code>limit_value</code> / <code>dmr_value</code>. Only the API's <code>get_effluent_chart</code> does. Run <code>pipeline</code> on a specific territory to fill these in.</div>
+        <div class="big-number">${cwaMissingDmr.toLocaleString()}</div>
+        <div class="subtitle">${pct}% of CWA events (${cwaWith.toLocaleString()} have full DMR detail)</div>
+        ${topStateCodes.length ? `<div class="health-action">
+          <div class="label">Suggested next step</div>
+          ${cmdBlock(commandFor(topStateCodes))}
+        </div>` : ""}
+      </div>`);
+  } else if (cwaTotal > 0) {
+    cards.push(`
+      <div class="health-card ok">
+        <h3>CWA depth looks good</h3>
+        <div class="subtitle">All ${cwaTotal.toLocaleString()} CWA events carry per-DMR detail (parameter, limit, measured value).</div>
+      </div>`);
+  }
+
+  // SDWA gate breadth note
+  if (h.command === "bulk_loader" || depth.sdwa_gate === "tight (SNC + formal-action)") {
+    cards.push(`
+      <div class="health-card info">
+        <h3>SDWA inventory uses the tight gate</h3>
+        <div class="subtitle">Bulk discovery keeps only public water systems with SNC = Y or a formal enforcement action. The API path uses <code>p_viola=Y</code> (any open violation), which surfaces roughly an order of magnitude more systems per state — useful for territory planning, not for cold-call lists.</div>
+        <ul>
+          <li><span class="state-code">Bulk SDWA leads loaded</span><span class="state-count">${(totals.leads_sdwa || 0).toLocaleString()}</span></li>
+        </ul>
+        <div class="health-action">
+          <div class="label">For a richer SDWA cut on a target territory</div>
+          ${cmdBlock(commandFor(topStateCodes.length ? topStateCodes : ["TX"]))}
+        </div>
+      </div>`);
+  }
+
+  // All-resolved cluster — could mean stale bulk data
+  if (onlyResolved > 0) {
+    cards.push(`
+      <div class="health-card warn">
+        <h3>${onlyResolved} lead${onlyResolved === 1 ? " has" : "s have"} only Resolved events</h3>
+        <div class="subtitle">The facility scored on flag signals but every drilled event is in Resolved/Archived status. Verify on the EPA ECHO page before any outreach — "do not call" is the safer default.</div>
+        <div class="big-number">${onlyResolved.toLocaleString()}</div>
+        <div class="subtitle">Filter the Inventory tab to <code>tag_only_resolved_events = True</code> to see them.</div>
+      </div>`);
+  }
+
+  // Drilldown stats summary (only if include_events was true)
+  if (h.include_events && drill && Object.keys(drill).length) {
+    const cands = drill.candidates || 0;
+    const recovered = (drill.cwa_recovered || 0) + (drill.sdwa_recovered || 0);
+    const missing = drill.still_missing_high_value || 0;
+    const klass = missing > 0 ? "warn" : "ok";
+    cards.push(`
+      <div class="health-card ${klass}">
+        <h3>API fine-comb stats</h3>
+        <div class="subtitle">Per-event drill-down on high-value, newly-discovered, and score-jumped leads.</div>
+        <ul>
+          <li><span class="state-code">Candidates queued</span><span class="state-count">${cands.toLocaleString()}</span></li>
+          <li><span class="state-code">Events recovered</span><span class="state-count">${recovered.toLocaleString()}</span></li>
+          <li><span class="state-code">Still no events after retries</span><span class="state-count">${missing.toLocaleString()}</span></li>
+        </ul>
+      </div>`);
+  }
+
+  // Warnings card (full width)
+  const warnHtml = warnings.length
+    ? warnings.map(w => `<div>[${escapeHtml(w.level || "WARN")}] ${escapeHtml(w.message || "")}</div>`).join("")
+    : `<div class="empty">No warnings emitted during this run.</div>`;
+  const warnCard = `
+    <div class="health-card ${warnings.length ? "warn" : "ok"}">
+      <h3>Run warnings (${warnings.length})</h3>
+      <div class="subtitle">EPA bot-blocks, throttle persistence, and end-of-run drill miss summaries. Empty means the run was clean.</div>
+      <div class="health-warning-list">${warnHtml}</div>
+    </div>`;
+
+  root.innerHTML = `
+    ${metaHtml}
+    <div class="health-grid">
+      ${cards.join("")}
+    </div>
+    <div style="height:16px;"></div>
+    <div class="health-grid full">
+      ${warnCard}
+    </div>`;
+
+  // Wire copy buttons
+  root.querySelectorAll(".copy-cmd").forEach(btn => {
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      const cmd = btn.dataset.cmd || "";
+      navigator.clipboard.writeText(cmd).then(
+        () => showToast("Command copied"),
+        () => showToast("Couldn't copy — select manually")
+      );
+    });
+  });
+
+  updateHealthBadge();
+}
+
+function updateHealthBadge() {
+  // Count "things worth attention" — high-score no-events leads + warnings.
+  // Drives the red badge on the tab.
+  const minScore = (health && health.thresholds && health.thresholds.event_drilldown_min_score) || 50;
+  let issues = 0;
+  for (const L of leads) {
+    if ((L.lead_score || 0) >= minScore && L.status === "NoEvents") issues += 1;
+  }
+  if (health && health.warnings) issues += health.warnings.length;
+
+  const badge = document.getElementById("healthBadge");
+  if (issues > 0) {
+    badge.classList.remove("hidden", "calm");
+    badge.textContent = issues > 99 ? "99+" : String(issues);
+  } else if (health) {
+    badge.classList.remove("hidden");
+    badge.classList.add("calm");
+    badge.textContent = "✓";
+  } else {
+    badge.classList.add("hidden");
+  }
+}
+
+function switchTab(name) {
+  activeTab = name;
+  document.querySelectorAll(".tab-btn").forEach(b => {
+    b.classList.toggle("active", b.dataset.tab === name);
+  });
+  document.querySelectorAll(".tab-pane").forEach(p => {
+    p.classList.toggle("active", p.id === "tab" + name[0].toUpperCase() + name.slice(1));
+  });
+  if (name === "health") renderHealth();
+}
+
 function render() {
   const filtered = sortRows(applyFilters(leads));
   renderTiles(filtered);
@@ -1294,10 +1805,21 @@ document.getElementById("uploadBtn").addEventListener("click", () => {
 document.getElementById("csvUpload").addEventListener("change", async e => {
   const files = Array.from(e.target.files || []);
   if (!files.length) return;
-  let newLeads = null, newEvents = null;
-  let leadFileName = "", eventFileName = "";
+  let newLeads = null, newEvents = null, newHealth = null;
+  let leadFileName = "", eventFileName = "", healthFileName = "";
   for (const f of files) {
     const text = await f.text();
+    // Detect run_health.json first by extension OR content (top-level
+    // schema_version key).
+    if (f.name.toLowerCase().endsWith(".json")) {
+      try {
+        const data = JSON.parse(text);
+        if (data && data.schema_version != null) {
+          newHealth = data; healthFileName = f.name;
+          continue;
+        }
+      } catch (_) { /* fall through, maybe it's misnamed CSV */ }
+    }
     const rows = parseCSV(text);
     if (!rows.length) continue;
     const cols = Object.keys(rows[0]);
@@ -1308,19 +1830,38 @@ document.getElementById("csvUpload").addEventListener("change", async e => {
     }
   }
   if (newLeads) {
-    setLeads(newLeads, newEvents || [], leadFileName + (eventFileName ? " + " + eventFileName : ""), false);
-    showToast(`Loaded ${newLeads.length} leads` + (newEvents ? ` + ${newEvents.length} events` : ""));
+    const parts = [leadFileName, eventFileName, healthFileName].filter(Boolean);
+    setLeads(newLeads, newEvents || [], parts.join(" + "), false);
   } else if (newEvents) {
     events = newEvents;
-    showToast(`Loaded ${newEvents.length} violation events (no leads file)`);
     render();
+  }
+  if (newHealth) {
+    setHealth(newHealth);
+  }
+  const toastParts = [];
+  if (newLeads) toastParts.push(`${newLeads.length} leads`);
+  if (newEvents) toastParts.push(`${newEvents.length} events`);
+  if (newHealth) toastParts.push("run health data");
+  if (toastParts.length) {
+    showToast("Loaded " + toastParts.join(" + "));
   } else {
-    showToast("CSV columns didn't match the expected pipeline output");
+    showToast("Files didn't match expected pipeline output");
   }
   e.target.value = "";
 });
 
+document.querySelectorAll(".tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+});
+
 document.getElementById("resetBtn").addEventListener("click", () => {
+  health = null;
+  document.getElementById("healthBody").innerHTML = `
+    <div class="health-empty">
+      <h3>No run health data loaded</h3>
+      <p>Upload <code>run_health.json</code> alongside the CSVs to populate this tab.</p>
+    </div>`;
   setLeads(SEED_LEADS, SEED_EVENTS, "Demo data", true);
   showToast("Reset to demo data");
 });

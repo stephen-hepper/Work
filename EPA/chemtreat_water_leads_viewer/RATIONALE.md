@@ -20,10 +20,10 @@ out.
 
 ---
 
-## Where the CSVs come from (as of 2026-05-22)
+## Where the CSVs come from (as of 2026-05-23)
 
 `all_leads.csv` and `violation_events.csv` are produced by SELECTing
-from `../snapshot.sqlite` at end of pipeline run, not by writing
+from `../snapshot.sqlite` at end of every run, not by writing
 in-memory state to disk. The DB is the single source of truth; the
 CSVs are a viewer-shaped view of it. Implications for this viewer:
 
@@ -46,6 +46,24 @@ CSVs are a viewer-shaped view of it. Implications for this viewer:
   never reach the DB. If a future event source emits IDless rows
   and sales asks why they're missing, the fix lives in the
   pipeline's fetch step, not in the viewer.
+
+### Both producers — API pipeline AND bulk loader — write the same shape
+
+`pipeline.py` (per-state API path) and `bulk_loader.py` (nationwide
+weekly CSV-download path) both go through `snapshot.dump_*_csv()`,
+so the viewer renders the output of either one identically. As of
+2026-05-23 the bulk loader also runs the same phase-2 augmentation
+(re-score with events, compute `outreach_posture`, compute
+`tag_*`) the API pipeline runs, and falls back to the API DFR for
+any high-value lead the bulk file missed. Sales gets full
+per-event drill-down detail from a single weekly `bulk_loader`
+run; no need to chase a follow-up API run.
+
+If you upload a bulk-run CSV vs. an API-run CSV to this viewer, the
+detail panels (score breakdown, outreach posture, compliance
+snapshot, recent events) should look qualitatively the same. If
+they don't, the divergence is upstream in the pipeline's data
+flatten/normalize step, not in the viewer.
 
 ---
 
@@ -221,7 +239,43 @@ Filters, sort order, and the expanded row reset on every page reload.
 Reps run this once per morning; persistence would add storage and
 privacy considerations for very little benefit.
 
-### 5. No diff highlighting from `new_*.csv`
+### 5a. Run Health tab (added 2026-05-26)
+
+The viewer has two tabs now: **Inventory** (the original table view) and
+**Run Health** (new). The Health tab surfaces signals a non-technical
+sales user would otherwise miss because they live in the terminal log:
+
+- **Coverage gap** — high-score leads (score ≥ 50) where the bulk feed
+  didn't supply event detail and the API fine-comb couldn't fill it in.
+  Grouped by state, with a copy-pasteable
+  `pipeline --states X,Y,Z` command for the top concentrations.
+- **Depth gap** — CWA events without per-DMR detail (parameter,
+  limit_value, dmr_value). Bulk NPDES files don't carry these; only the
+  API path produces them.
+- **SDWA gate breadth note** — explains why bulk SDWA inventory is
+  small (tight gate) and offers the API command for a richer territory
+  cut.
+- **All-resolved cluster** — leads with `tag_only_resolved_events=True`.
+- **API fine-comb stats** — candidates queued, events recovered, still
+  missing after retries.
+- **Run warnings** — every WARNING the pipeline emitted (bot-blocks,
+  throttle persistence, drill-down miss summaries).
+
+Data sources:
+- `out/run_health.json` (new file written by both `bulk_loader.run_bulk`
+  and `pipeline.run` via `chemtreat_water_leads/_health.py`). Schema is
+  versioned (`schema_version: 1`); the viewer refuses to render
+  unknown versions to avoid silent staleness.
+- The currently-loaded `all_leads.csv` and `violation_events.csv` —
+  several signals (per-state coverage gap, only-resolved cluster) are
+  derived directly from the leads array so they stay in sync with what
+  the user filters in the Inventory tab.
+
+A red badge on the Run Health tab counts "things worth attention"
+(high-score no-events leads + warnings). A green checkmark badge
+appears when health is loaded but nothing's flagged.
+
+### 5b. No diff highlighting from `new_*.csv`
 
 **Status:** Open, future work.
 

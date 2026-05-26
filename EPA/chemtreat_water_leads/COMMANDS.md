@@ -149,6 +149,14 @@ python -m chemtreat_water_leads.bulk_loader \
 **First run:** **~5–10 min** (just `echo_exporter.zip`).
 **Later runs:** **~1–3 min.**
 
+`--no-events` makes the run fully offline — **zero EPA API calls** and
+zero event-zip downloads (no `npdes_downloads.zip`, no
+`SDWA_latest_downloads.zip`, no API fine-comb fallback to
+`echo.epa.gov`). Use this in air-gapped or rate-limit-sensitive
+environments. The facility inventory still lands in
+`all_leads.csv` and the snapshot DB; only the per-event detail is
+absent.
+
 ---
 
 ## Nationwide bulk, filtered to specific states
@@ -188,6 +196,22 @@ The cron writes one timestamped directory per run, so the
 `new_facilities_YYYYMMDD.csv` files form a daily history you can keep
 or rotate. The `snapshot.sqlite` is the source of truth across runs —
 **don't delete it** unless you want every facility to look "new" again.
+
+---
+
+## Running tests
+
+The project ships with a stdlib `unittest` suite covering the bulk
+loader's discovery, scoring, event-join, and `--no-events` paths.
+
+```bash
+cd EPA
+../.venv/bin/python -m unittest discover -s tests -t .
+```
+
+23 tests, runs in well under a second. No network access required —
+all fixtures are in-memory zips. Run before any change to
+`bulk_loader.py` so regressions show up immediately.
 
 ---
 
@@ -245,6 +269,7 @@ After any run, the output directory contains:
 | `READ_ME_FIRST.txt` | Lag warning. Open first. | Every run |
 | `all_leads.csv` | Full ranked inventory of current violators | Every run, overwritten |
 | `violation_events.csv` | Underlying individual DMR / SDWA events | Every run, overwritten |
+| `run_health.json` | Run metadata + warnings + coverage/depth signals for the viewer's Run Health tab | Every run, overwritten |
 | `new_facilities_YYYYMMDD.csv` | Facilities first seen this run | Per-run dated file |
 | `newly_snc_YYYYMMDD.csv` | Facilities that crossed into Significant Non-Complier since last run | Per-run dated file |
 | `new_violations_YYYYMMDD.csv` | Individual new violation events since last run | Per-run dated file |

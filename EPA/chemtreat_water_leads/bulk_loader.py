@@ -43,16 +43,18 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import json
 import logging
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.request import urlretrieve
+import requests
 
-from . import scoring, snapshot
+from . import _health, scoring, snapshot
 from .pipeline import (
     TARGET_NAICS, LAG_BANNER, SDWA_LAG_NOTE, CWA_LAG_NOTE,
-    _write_csv, _write_lag_notice,
+    EVENT_DRILLDOWN_MIN_SCORE, LOOKBACK_DAYS,
+    _drill_cwa, _drill_sdwa, _write_csv, _write_lag_notice,
 )
 
 log = logging.getLogger("chemtreat.bulk")
@@ -95,7 +97,16 @@ def _download_cached(url: str, cache_dir: Path, name: str) -> Path:
                  name, age.total_seconds() / 86400, CACHE_MAX_AGE_DAYS)
 
     log.info("Downloading %s from %s …", name, url)
-    urlretrieve(url, str(target))
+    # Use `requests` (which trusts certifi's CA bundle) rather than
+    # urllib.request.urlretrieve — the latter relies on the system's
+    # OpenSSL trust store which is empty on stock macOS Python.framework
+    # installs and trips SSL: CERTIFICATE_VERIFY_FAILED.
+    with requests.get(url, stream=True, timeout=300) as r:
+        r.raise_for_status()
+        with target.open("wb") as fh:
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    fh.write(chunk)
     log.info("Saved %s (%.1f MB)", name, target.stat().st_size / 1e6)
     return target
 
@@ -120,37 +131,80 @@ def _row_matches_naics(row: dict, prefixes: list[str]) -> bool:
     return any(c.startswith(p) for c in codes for p in prefixes)
 
 
-def _row_has_water_violation(row: dict) -> bool:
-    """Filter: facility has CWA or SDWA non-compliance worth attention.
+# --------------------------------------------------------- program signals
+#
+# Two program-specific predicates instead of one combined gate. CWA and
+# SDWA cannot share a "has any signal" check because the scoring rules
+# read program-specific field names — and Python's `or` collapses CWA's
+# string "0" onto SDWA's "5" silently, masking the SDWA signal. Splitting
+# the discovery gate and the raw-shape dict eliminates the mask.
 
-    The ECHO Exporter has many flag fields. We accept a row if ANY of:
-      - SNC flag set on CWA or SDWA
-      - >0 formal enforcement actions on CWA or SDWA
-      - >0 quarters in non-compliance under CWA
-      - Current violation flag on CWA
-    """
+_SNC_CLEAN_STATUSES = {"NO VIOLATION IDENTIFIED", "NOT APPLICABLE", "UNKNOWN", "N/A", ""}
+
+
+def _row_has_cwa_signal(row: dict) -> bool:
+    """True if the facility has any CWA compliance signal worth attention."""
     if str(row.get("CWA_SNC_FLAG") or "").upper() in ("Y", "S"):
         return True
-    if str(row.get("SDWA_SNC_FLAG") or "").upper() == "Y":
-        return True
     if _safe_int(row.get("CWA_FORMAL_ACTION_COUNT")) > 0:
-        return True
-    if _safe_int(row.get("SDWA_FORMAL_ACTION_COUNT")) > 0:
         return True
     if _safe_int(row.get("CWA_QTRS_WITH_NC")) > 0:
         return True
     if str(row.get("CWA_CURRENT_VIOL") or "").upper() == "Y":
         return True
+    status = str(row.get("CWA_COMPLIANCE_STATUS") or "").strip().upper()
+    if status and status not in _SNC_CLEAN_STATUSES:
+        return True
     return False
 
 
-def _bulk_to_api_shape(row: dict) -> dict:
-    """Map bulk-CSV column names (UNDERSCORE_CASE) → API field names (CamelCase)
-    so the same scoring.score_facility() function works on bulk rows.
+def _row_has_sdwa_signal(row: dict) -> bool:
+    """True if the facility has any SDWA compliance signal worth attention.
 
-    Keeping one canonical 'API shape' for the scorer means the rules in
-    scoring.py don't need a parallel implementation for bulk data."""
-    return {
+    The ECHO Exporter exposes only four SDWA facility-level signals:
+    SDWA_SNC_FLAG, SDWA_FORMAL_ACTION_COUNT, SDWA_INFORMAL_COUNT, and
+    SDWA_COMPLIANCE_STATUS (verbose text). No quarters-with-vio or
+    Pb/Cu flags at this level — chronic / lead-copper rules need event
+    data (from the SDWA bulk events file or API fallback) to fire for
+    SDWA. Documented in RATIONALE.md.
+
+    Discovery gate intentionally NARROW: SNC flag OR formal-action
+    count. We deliberately do NOT accept generic SDWA_COMPLIANCE_STATUS
+    text — empirically (TX, 167k rows), "Inactive" and "Violation
+    Identified" together account for ~10K rows that aren't actionable
+    leads (Inactive = not operating, Violation Identified = generic
+    catch-all). "Enforcement Priority" — the only status text the
+    scorer's text-match recognizes — is perfectly correlated with
+    SNC_FLAG=Y in practice, so the narrow gate doesn't lose signal.
+    """
+    if str(row.get("SDWA_SNC_FLAG") or "").upper() in ("Y", "S"):
+        return True
+    if _safe_int(row.get("SDWA_FORMAL_ACTION_COUNT")) > 0:
+        return True
+    return False
+
+
+def _bulk_to_program_shapes(row: dict) -> list[tuple[str, dict]]:
+    """Build per-program raw dicts for the scorer.
+
+    Returns 0, 1, or 2 (program, raw_dict) tuples. CWA-only when only
+    CWA signals fire, SDWA-only when only SDWA signals fire, both when
+    both fire, empty otherwise.
+
+    **Each raw dict carries ONLY that program's keys** — no cross-program
+    aliases. This is load-bearing: the scoring rules use Python `or`
+    fallbacks (`f.get("CWPFormalEaCnt") or f.get("Feas")`), and a CWA
+    `"0"` string is truthy enough to mask the SDWA value. Two clean
+    dicts make that impossible.
+
+    Key names match what `scoring.py` reads (verified against
+    rule_significant_violator, rule_chronic_violation, rule_formal_action,
+    rule_major_facility, rule_recent_penalty, rule_recent_inspection,
+    compute_tags).
+    """
+    out: list[tuple[str, dict]] = []
+
+    identity = {
         "FacName": row.get("FAC_NAME"),
         "FacStreet": row.get("FAC_STREET"),
         "FacCity": row.get("FAC_CITY"),
@@ -160,30 +214,63 @@ def _bulk_to_api_shape(row: dict) -> dict:
         "FacNAICSCodes": row.get("FAC_NAICS_CODES"),
         "FacSICCodes": row.get("FAC_SIC_CODES"),
         "RegistryID": row.get("REGISTRY_ID"),
-        "SourceID": row.get("NPDES_IDS") or row.get("SDWA_IDS"),
-        "CWASNC": row.get("CWA_SNC_FLAG"),
-        "SDWASNC": row.get("SDWA_SNC_FLAG"),
-        "CWAQtrsWithNC": row.get("CWA_QTRS_WITH_NC"),
-        "CWAFormalActionCount": row.get("CWA_FORMAL_ACTION_COUNT"),
-        "SDWAFormalActionCount": row.get("SDWA_FORMAL_ACTION_COUNT"),
-        "CWAInformalCount": row.get("CWA_INFORMAL_COUNT"),
-        "SDWAInformalCount": row.get("SDWA_INFORMAL_COUNT"),
-        "CWAMajorFlag": "Y" if "MAJOR" in str(
-            row.get("CWA_PERMIT_TYPES") or "").upper() else "N",
-        "CWAPermitTypes": row.get("CWA_PERMIT_TYPES"),
-        "CWALastPenaltyAmt": row.get("CWA_LAST_PENALTY_AMT"),
-        "SDWALastPenaltyAmt": row.get("SDWA_LAST_PENALTY_AMT"),
-        "CWADaysLastInspection": row.get("CWA_DAYS_LAST_INSPECTION"),
     }
+
+    if _row_has_cwa_signal(row):
+        cwa_status = str(row.get("CWA_COMPLIANCE_STATUS") or "").strip() or None
+        cwa = {
+            **identity,
+            "SourceID": row.get("NPDES_IDS"),
+            "SNCFlag": "Y" if str(row.get("CWA_SNC_FLAG") or "").upper()
+                              in ("Y", "S") else "N",
+            "CWPSNCStatus": cwa_status,
+            "CWPQtrsWithNC": row.get("CWA_QTRS_WITH_NC"),
+            "CWPFormalEaCnt": row.get("CWA_FORMAL_ACTION_COUNT"),
+            "CWPInformalEnfActCount": row.get("CWA_INFORMAL_COUNT"),
+            "CWPPermitTypes": row.get("CWA_PERMIT_TYPES"),
+            "CWPTotalPenalties": row.get("CWA_LAST_PENALTY_AMT"),
+            "CWPDaysLastInspection": row.get("CWA_DAYS_LAST_INSPECTION"),
+            "CWP13qtrsComplHistory": row.get("CWA_13QTRS_COMPL_HISTORY"),
+            "CWPViolStatus": row.get("CWA_CURRENT_VIOL"),
+        }
+        out.append(("CWA", cwa))
+
+    if _row_has_sdwa_signal(row):
+        sdwa_status = str(row.get("SDWA_COMPLIANCE_STATUS") or "").strip() or None
+        snc_y = str(row.get("SDWA_SNC_FLAG") or "").upper() in ("Y", "S")
+        sdwa = {
+            **identity,
+            "SourceID": row.get("SDWA_IDS"),
+            "SNCFlag": "Y" if snc_y else "N",
+            "SNC": sdwa_status,
+            "SeriousViolator": "Y" if snc_y else "N",
+            "Feas": row.get("SDWA_FORMAL_ACTION_COUNT"),
+            "Ifea": row.get("SDWA_INFORMAL_COUNT"),
+        }
+        out.append(("SDWA", sdwa))
+
+    return out
 
 
 def stream_echo_exporter(zip_path: Path,
                          naics_prefixes: list[str],
                          states: list[str] | None = None):
-    """Generator yielding filtered (raw_row, api_shape) tuples from the
-    ECHO Exporter. Stream-processed so we don't load 1.5M rows into RAM.
+    """Generator yielding filtered (raw_row, program, prog_raw) triples.
+
+    One row in the ECHO Exporter can produce zero, one, or two emissions:
+    CWA-only, SDWA-only, or both. Each emission carries a program-specific
+    raw dict (see `_bulk_to_program_shapes`).
+
+    Gating rules differ by program:
+      - CWA: must match TARGET_NAICS server-side (this is what ChemTreat
+        sells to — industrial dischargers).
+      - SDWA: emit regardless of NAICS. Public water systems are the
+        customer; they don't carry the industrial NAICS classification
+        the exporter uses for facilities. Mirrors `find_sdwa_violators`
+        in the API path, which applies no NAICS filter.
 
     If `states` is provided, only rows from those state codes are yielded.
+    Stream-processed so we don't load 1.5M rows into RAM.
     """
     with zipfile.ZipFile(zip_path) as zf:
         csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
@@ -202,12 +289,18 @@ def stream_echo_exporter(zip_path: Path,
                 total += 1
                 if states and str(row.get("FAC_STATE") or "").upper() not in states:
                     continue
-                if not _row_matches_naics(row, naics_prefixes):
+                shapes = _bulk_to_program_shapes(row)
+                if not shapes:
                     continue
-                if not _row_has_water_violation(row):
-                    continue
-                matched += 1
-                yield row, _bulk_to_api_shape(row)
+                naics_ok = _row_matches_naics(row, naics_prefixes)
+                emitted_any = False
+                for program, prog_raw in shapes:
+                    if program == "CWA" and not naics_ok:
+                        continue
+                    yield row, program, prog_raw
+                    emitted_any = True
+                if emitted_any:
+                    matched += 1
                 if total % 100_000 == 0:
                     log.info("  scanned %d rows, %d matches so far",
                              total, matched)
@@ -220,65 +313,193 @@ def stream_echo_exporter(zip_path: Path,
 # CSV and the SDWA violations CSV rather than calling the API per facility.
 # Both are streaming-safe.
 
+# --------------------------------------------------------- event shape
+#
+# Bulk event CSVs use different field names and a different category
+# vocabulary than the API DFR drill-down. Without normalization, the
+# scoring.EVENT_RULES (which key on substrings like "TREATMENT TECHNIQUE"
+# in violation_category) never fire on bulk events — so bulk-loaded
+# facilities get facility-only scores and never populate outreach_posture
+# / tag_* via the phase-2 augmentation.
+#
+# These helpers map bulk shape onto API shape (the canonical schema that
+# scoring + viewer expect). The translation is conservative: when bulk
+# doesn't carry a field the API path has (e.g. enforcement_count), we
+# pass through whatever bulk *did* have so the row still flows.
+
+# Short-form -> API-shape category names. Bulk uses sdwa_codes.lookup_violation
+# which returns curt labels ("MCL", "TreatmentTechnique"); the API uses
+# EPA's verbose strings. EVENT_RULES substring-matches on the verbose form.
+_SDWA_CATEGORY_EXPANSION = {
+    "MCL":                 "Maximum Contaminant Level Violation",
+    "MRDL":                "Maximum Residual Disinfectant Level Violation",
+    "TreatmentTechnique":  "Treatment Technique Violation",
+    "Monitoring":          "Monitoring and Reporting",
+    "Reporting":           "Monitoring and Reporting",
+    "PublicNotification":  "Public Notification Rule Violation",
+}
+
+# Status codes seen in SDWIS bulk → API's outreach vocabulary. SDWIS
+# uses single-character codes (R/U/A/K) AND fuller strings depending on
+# the field; we accept both.
+_SDWA_STATUS_NORMALIZATION = {
+    "U": "Unaddressed",     "UNADDRESSED": "Unaddressed",   "OPEN": "Unaddressed",
+    "UNRESOLVED": "Unaddressed",
+    "A": "Addressed",       "ADDRESSED": "Addressed",
+    "RTC": "Resolved",      "RESOLVED": "Resolved",
+    "RETURNED TO COMPLIANCE": "Resolved",
+    "K": "Archived",        "ARCHIVED": "Archived",
+}
+
+
+def _normalize_bulk_sdwa_event(e: dict) -> dict:
+    """Reshape a bulk SDWA event into the API event schema."""
+    cat = e.get("violation_category") or ""
+    e["violation_category"] = _SDWA_CATEGORY_EXPANSION.get(cat, cat)
+    status_raw = str(e.get("status") or "").strip().upper()
+    e["status"] = _SDWA_STATUS_NORMALIZATION.get(status_raw, e.get("status") or "Unaddressed")
+    # Field the API path supplies that bulk doesn't.
+    e.setdefault("source_id", e.pop("pwsid", None))
+    e.setdefault("resolved_date", e.get("period_end") if e["status"] == "Resolved" else None)
+    e.setdefault("enforcement_count", 0)
+    e.setdefault("state_mcl", None)
+    e.setdefault("federal_mcl", None)
+    e.setdefault("measure", None)
+    return e
+
+
+def _normalize_bulk_npdes_event(e: dict) -> dict:
+    """Reshape a bulk NPDES event into the API event schema.
+
+    Bulk NPDES doesn't carry per-event status the same way API does;
+    we default to Unaddressed for any row that isn't explicitly closed.
+    """
+    rnc = str(e.get("status") or "").strip().upper()
+    # RNC_DETECTION_CODE values: blank/null = open, specific codes can
+    # indicate resolved. Without a documented enum we default to open
+    # unless we see an explicit clearance marker. Sales should verify on
+    # ECHO anyway (the data-lag warning makes that the standing advice).
+    if rnc in ("", "0", "NONE"):
+        e["status"] = "Unaddressed"
+    elif rnc in _SDWA_STATUS_NORMALIZATION:
+        e["status"] = _SDWA_STATUS_NORMALIZATION[rnc]
+    else:
+        e["status"] = "Unaddressed"
+    # Map permit_id -> npdes_id (the schema column name).
+    if e.get("permit_id"):
+        e.setdefault("npdes_id", e.pop("permit_id"))
+    return e
+
+
+# NPDES bulk violation CSVs we actually want to read. The previous
+# selector picked NPDES_VIOLATION_ENFORCEMENTS.csv, which is a join
+# table (violations ↔ enforcement actions) with no NPDES_ID column —
+# wrong file. The substantive per-event data lives in three sibling
+# files: Single-Event (effluent exceedances), Permit-Schedule
+# (compliance milestones), Compliance-Schedule (long-form schedules).
+# All three share NPDES_ID, NPDES_VIOLATION_ID, VIOLATION_CODE,
+# VIOLATION_DESC, RNC_DETECTION_CODE, and date columns.
+_NPDES_VIOLATION_FILES = (
+    "NPDES_SE_VIOLATIONS.csv",
+    "NPDES_PS_VIOLATIONS.csv",
+    "NPDES_CS_VIOLATIONS.csv",
+)
+
+
 def stream_npdes_violations(zip_path: Path,
-                            registry_id_set: set[str]) -> list[dict]:
+                            registry_id_set: set[str],
+                            permit_id_set: set[str] | None = None,
+                            permit_to_registry: dict[str, str] | None = None
+                            ) -> list[dict]:
     """Pull NPDES violation events for the facilities we kept.
 
-    `registry_id_set` should be the set of RegistryIDs we kept from the
-    ECHO Exporter pass; we only emit events whose facility we care about.
+    Joins by REGISTRY_ID when present on the bulk row, otherwise by
+    NPDES_ID. Bulk NPDES violation CSVs do NOT carry REGISTRY_ID in
+    practice (verified against NPDES_SE_VIOLATIONS / NPDES_PS_VIOLATIONS
+    / NPDES_CS_VIOLATIONS headers), so the permit-id fallback is
+    actually the dominant path. `permit_to_registry` lets us backfill
+    the lead's RegistryID onto the event so the downstream
+    `events_by_key` join works and `snapshot`'s `registry_id` column
+    is populated.
+
+    Reads SE + PS + CS files (effluent exceedances + permit-schedule
+    milestones + compliance-schedule events). All three share the same
+    column shape for our purposes.
     """
+    permit_id_set = permit_id_set or set()
+    permit_to_registry = permit_to_registry or {}
     events: list[dict] = []
     with zipfile.ZipFile(zip_path) as zf:
-        # The npdes_downloads.zip contains many CSVs; the one we want
-        # is NPDES_VIOLATIONS.csv (or similar). Find it defensively.
-        target = next(
-            (n for n in zf.namelist()
-             if "VIOLATION" in n.upper() and n.lower().endswith(".csv")
-             and "QNCR" not in n.upper()),  # skip the QNCR summary table
-            None,
-        )
-        if target is None:
-            log.warning("No NPDES violations CSV found inside %s", zip_path.name)
+        present = {n for n in zf.namelist()}
+        targets = [n for n in _NPDES_VIOLATION_FILES if n in present]
+        if not targets:
+            log.warning("No NPDES per-event violation CSV found inside %s "
+                        "(looked for %s)",
+                        zip_path.name, ", ".join(_NPDES_VIOLATION_FILES))
             return events
-        log.info("Reading %s", target)
-        with zf.open(target) as raw_fh:
-            text_fh = io.TextIOWrapper(raw_fh, encoding="utf-8", errors="replace")
-            for row in csv.DictReader(text_fh):
-                # NPDES bulk uses NPDES_ID, not RegistryID, so we'd need
-                # a join. For now, emit all rows and let downstream filter.
-                # (A future optimization: join via the permits CSV.)
-                events.append({
-                    "violation_id": row.get("NPDES_VIOLATION_ID")
-                                    or row.get("VIOLATION_ID"),
-                    "registry_id": row.get("REGISTRY_ID"),
-                    "permit_id": row.get("NPDES_ID")
-                                 or row.get("EXTERNAL_PERMIT_NMBR"),
-                    "program": "CWA",
-                    "parameter": row.get("PARAMETER_DESC") or row.get("PARAMETER_CODE"),
-                    "limit_value": row.get("LIMIT_VALUE_NMBR"),
-                    "dmr_value": row.get("DMR_VALUE_NMBR"),
-                    "exceedance_pct": row.get("EXCEEDENCE_PCT"),
-                    "period_end": row.get("MONITORING_PERIOD_END_DATE"),
-                    "violation_code": row.get("VIOLATION_CODE"),
-                    "status": row.get("RNC_DETECTION_CODE") or "Unresolved",
-                    "data_lag_note": CWA_LAG_NOTE,
-                })
-    log.info("Read %d raw NPDES violation events; filtering to %d "
-             "target facilities…", len(events), len(registry_id_set))
-    if not registry_id_set:
-        return events
-    # Filter to facilities we kept
-    return [e for e in events if e.get("registry_id") in registry_id_set]
+        for target in targets:
+            log.info("Reading %s", target)
+            with zf.open(target) as raw_fh:
+                text_fh = io.TextIOWrapper(raw_fh, encoding="utf-8",
+                                          errors="replace")
+                for row in csv.DictReader(text_fh):
+                    row_reg = row.get("REGISTRY_ID") or None
+                    permit = (row.get("NPDES_ID")
+                              or row.get("EXTERNAL_PERMIT_NMBR"))
+                    # Apply the join filter early to keep memory bounded.
+                    keep = False
+                    backfill_reg = None
+                    if row_reg and row_reg in registry_id_set:
+                        keep = True
+                    elif permit and permit in permit_id_set:
+                        keep = True
+                        backfill_reg = permit_to_registry.get(permit)
+                    if not keep:
+                        continue
+                    events.append({
+                        "violation_id": row.get("NPDES_VIOLATION_ID")
+                                        or row.get("VIOLATION_ID"),
+                        "registry_id": row_reg or backfill_reg,
+                        "permit_id": permit,
+                        "program": "CWA",
+                        "violation_code": row.get("VIOLATION_CODE"),
+                        "violation_description": row.get("VIOLATION_DESC"),
+                        # Bulk NPDES violation files don't carry the per-DMR
+                        # parameter / limit_value / dmr_value / exceedance_pct
+                        # columns the API path (`get_effluent_chart`) does;
+                        # set them to None so the schema slots stay populated.
+                        "parameter": None,
+                        "limit_value": None,
+                        "dmr_value": None,
+                        "exceedance_pct": None,
+                        "period_end": row.get("SINGLE_EVENT_END_DATE")
+                                       or row.get("SCHEDULE_DATE")
+                                       or row.get("RNC_DETECTION_DATE"),
+                        "resolved_date": row.get("RNC_RESOLUTION_DATE")
+                                          or row.get("REPORT_RECEIVED_DATE"),
+                        "status": row.get("RNC_DETECTION_CODE") or "Unresolved",
+                        "data_lag_note": CWA_LAG_NOTE,
+                    })
+    log.info("Kept %d NPDES violation events after join", len(events))
+    return [_normalize_bulk_npdes_event(e) for e in events]
 
 
 def stream_sdwa_violations(zip_path: Path,
-                           registry_id_set: set[str]) -> list[dict]:
+                           registry_id_set: set[str],
+                           pwsid_set: set[str] | None = None,
+                           pwsid_to_registry: dict[str, str] | None = None
+                           ) -> list[dict]:
     """Pull SDWA violation events for kept facilities.
 
-    The SDWA bulk uses PWSID (not RegistryID) as primary key. We accept
-    either-or because the ECHO Exporter publishes both.
+    Joins by REGISTRY_ID when present, otherwise by PWSID. The SDWA
+    bulk does NOT carry REGISTRY_ID at all on violation rows — only
+    PWSID — so the PWSID fallback is the only working join path. We
+    backfill the lead's RegistryID onto the event via `pwsid_to_registry`
+    so snapshot's `registry_id` column is populated.
     """
     from . import sdwa_codes
+    pwsid_set = pwsid_set or set()
+    pwsid_to_registry = pwsid_to_registry or {}
     events: list[dict] = []
 
     with zipfile.ZipFile(zip_path) as zf:
@@ -294,14 +515,25 @@ def stream_sdwa_violations(zip_path: Path,
         with zf.open(target) as raw_fh:
             text_fh = io.TextIOWrapper(raw_fh, encoding="utf-8", errors="replace")
             for row in csv.DictReader(text_fh):
+                row_reg = row.get("REGISTRY_ID") or None
+                pwsid = row.get("PWSID")
+                keep = False
+                backfill_reg = None
+                if row_reg and row_reg in registry_id_set:
+                    keep = True
+                elif pwsid and pwsid in pwsid_set:
+                    keep = True
+                    backfill_reg = pwsid_to_registry.get(pwsid)
+                if not keep:
+                    continue
                 vio_code = str(row.get("VIOLATION_CODE") or "")
                 cont_code = str(row.get("CONTAMINANT_CODE") or "")
-                rule_code = str(row.get("RULE_CODE") or "")
+                rule_code = str(row.get("RULE_CODE") or row.get("RULE_FAMILY_CODE") or "")
                 category, vio_desc = sdwa_codes.lookup_violation(vio_code)
                 events.append({
                     "violation_id": row.get("VIOLATION_ID"),
-                    "registry_id": row.get("REGISTRY_ID"),
-                    "pwsid": row.get("PWSID"),
+                    "registry_id": row_reg or backfill_reg,
+                    "pwsid": pwsid,
                     "program": "SDWA",
                     "violation_code": vio_code,
                     "violation_category": category,
@@ -316,95 +548,347 @@ def stream_sdwa_violations(zip_path: Path,
                     "pn_tier": row.get("CALCULATED_PUB_NOTIFICATION_TIER"),
                     "data_lag_note": SDWA_LAG_NOTE,
                 })
-    log.info("Read %d raw SDWA violation events", len(events))
-    if not registry_id_set:
-        return events
-    return [e for e in events if e.get("registry_id") in registry_id_set]
+    log.info("Kept %d SDWA violation events after join", len(events))
+    return [_normalize_bulk_sdwa_event(e) for e in events]
 
 
 # ----------------------------------------------------- main pipeline
+
+def _load_prior_scores(db_path: Path) -> dict[tuple[str, str], int]:
+    """Snapshot lead scores from the DB before this run upserts.
+
+    Returns `{(registry_id, program): lead_score}`. Used to identify
+    newly-discovered facilities and facilities whose score has jumped,
+    both of which qualify for the API fine-comb drill-down even when
+    they're below `EVENT_DRILLDOWN_MIN_SCORE`. Opens its own DB context
+    so it doesn't interfere with the run's main persistence block.
+    """
+    prior: dict[tuple[str, str], int] = {}
+    with snapshot.open_db(db_path) as conn:
+        for r in conn.execute(
+            "SELECT registry_id, program, lead_score FROM facilities"
+        ):
+            if r["registry_id"]:
+                prior[(r["registry_id"], r["program"])] = r["lead_score"] or 0
+    return prior
+
+
+def _build_lead_row(prog_raw: dict, program: str,
+                    score: int, reasons: list[str]) -> dict:
+    """Construct the lead dict for a single (facility, program) pair.
+
+    Program-aware: pulls from CWA-named or SDWA-named keys depending on
+    which raw dict was handed in. Tag columns are initialised to False
+    here and overwritten by `compute_tags` after the phase-2 event
+    augmentation.
+    """
+    reg_id = prog_raw.get("RegistryID")
+    if program == "CWA":
+        snc_status = prog_raw.get("CWPSNCStatus")
+        violation_status = prog_raw.get("CWPViolStatus")
+        quarters = prog_raw.get("CWPQtrsWithNC")
+        formal = prog_raw.get("CWPFormalEaCnt")
+        informal = prog_raw.get("CWPInformalEnfActCount")
+        penalties = prog_raw.get("CWPTotalPenalties")
+        inspection_days = prog_raw.get("CWPDaysLastInspection")
+        compliance_history = prog_raw.get("CWP13qtrsComplHistory")
+    else:
+        snc_status = prog_raw.get("SNC")
+        violation_status = ("Yes" if str(prog_raw.get("SNCFlag") or "").upper() == "Y"
+                            else None)
+        quarters = None  # bulk SDWA has no quarters-with-vio column
+        formal = prog_raw.get("Feas")
+        informal = prog_raw.get("Ifea")
+        penalties = None
+        inspection_days = None
+        compliance_history = None
+
+    return {
+        "lead_score": score,
+        "score_reasons": " | ".join(reasons),
+        "outreach_posture": "no_events",
+        "program": program,
+        "registry_id": reg_id,
+        "company": prog_raw.get("FacName"),
+        "address": prog_raw.get("FacStreet"),
+        "city": prog_raw.get("FacCity"),
+        "state": prog_raw.get("FacState"),
+        "zip": prog_raw.get("FacZip"),
+        "county": prog_raw.get("FacCounty"),
+        "naics": prog_raw.get("FacNAICSCodes"),
+        "sic": prog_raw.get("FacSICCodes"),
+        "permit_id": prog_raw.get("SourceID"),
+        "snc_status": snc_status,
+        "violation_status": violation_status,
+        "quarters_in_violation": quarters,
+        "formal_actions_5yr": formal,
+        "informal_actions_5yr": informal,
+        "total_penalties_usd": penalties,
+        "last_inspection_days_ago": inspection_days,
+        "compliance_history_13q": compliance_history,
+        "echo_url": ("https://echo.epa.gov/detailed-facility-report"
+                     f"?fid={reg_id or ''}"),
+        "tag_active_snc": False,
+        "tag_treatment_technique": False,
+        "tag_mcl_violation": False,
+        "tag_lead_copper": False,
+        "tag_major_facility": False,
+        "tag_only_resolved_events": False,
+        "tag_chemtreat_high_relevance": False,
+        "__raw": prog_raw,
+    }
+
+
+def _augment_leads(leads: list[dict], events: list[dict],
+                   touched_keys: set[tuple] | None = None) -> None:
+    """Phase-2 re-score + tag + outreach_posture augmentation.
+
+    Mirrors the equivalent block in `pipeline.run`. Mutates `leads` in
+    place. If `touched_keys` is provided, only augments leads whose
+    `(registry_id, program)` is in that set — used after the API
+    fine-comb so we don't redo work on leads whose events didn't change.
+    """
+    events_by_key: dict[tuple, list[dict]] = {}
+    for ev in events:
+        key = (ev.get("registry_id"), ev.get("program"))
+        if key[0]:
+            events_by_key.setdefault(key, []).append(ev)
+
+    for lead in leads:
+        key = (lead["registry_id"], lead["program"])
+        if touched_keys is not None and key not in touched_keys:
+            continue
+        lead_events = events_by_key.get(key, [])
+        raw = lead.get("__raw") or {}
+        new_score, new_reasons = scoring.score_facility(raw, lead_events)
+        lead["lead_score"] = new_score
+        lead["score_reasons"] = " | ".join(new_reasons)
+        lead["outreach_posture"] = scoring.compute_outreach_posture(lead_events)
+        lead.update(scoring.compute_tags(raw, lead_events))
+
+
+# Floor for the secondary drill-down triggers (newly-discovered,
+# score-jumped). Without this, a from-scratch nationwide first-run
+# would queue every facility for API drill-down because they're all
+# "newly discovered" — easily 100K calls and a guaranteed bot-block.
+# 20 captures any lead with at least one substantive scoring rule fire
+# (quarters≥1, SNC text without flag, or formal action) without the
+# long-tail noise.
+SECONDARY_DRILLDOWN_MIN_SCORE = 20
+
+
+def _drilldown_candidates(leads: list[dict],
+                          prior_scores: dict[tuple[str, str], int]
+                          ) -> list[dict]:
+    """Pick which leads deserve API fine-comb drill-down this run.
+
+    Three independent triggers — any one is sufficient:
+      1. `lead_score >= EVENT_DRILLDOWN_MIN_SCORE` — absolute threshold;
+         high-value leads always get per-event detail.
+      2. Newly-discovered (no prior DB row) AND
+         `lead_score >= SECONDARY_DRILLDOWN_MIN_SCORE` — diff signal
+         for fresh leads, floored to avoid the from-scratch first-run
+         pathological case (drilling every facility we've ever seen).
+      3. Score jumped by >10 since the prior run AND
+         `lead_score >= SECONDARY_DRILLDOWN_MIN_SCORE` — trajectory
+         change worth investigating, same floor for the same reason.
+
+    Leads that already have per-event detail from the bulk feed
+    (`outreach_posture != "no_events"`) are excluded — the API drill
+    would be redundant.
+    """
+    out: list[dict] = []
+    for lead in leads:
+        if lead["outreach_posture"] != "no_events":
+            continue
+        key = (lead["registry_id"], lead["program"])
+        score = lead["lead_score"]
+        prior = prior_scores.get(key)
+        if score >= EVENT_DRILLDOWN_MIN_SCORE:
+            out.append(lead)
+        elif score < SECONDARY_DRILLDOWN_MIN_SCORE:
+            continue
+        elif prior is None:
+            out.append(lead)
+        elif score > prior + 10:
+            out.append(lead)
+    return out
+
 
 def run_bulk(out_dir: Path,
              db_path: Path,
              cache_dir: Path,
              states: list[str] | None = None,
              include_events: bool = True) -> None:
-    """End-to-end bulk pipeline. Same output shape as pipeline.run()."""
+    """End-to-end bulk pipeline. Same output shape as pipeline.run().
+
+    With `include_events=False`, the run makes zero EPA API calls and
+    zero event-zip downloads. Useful for air-gapped or rate-limit
+    sensitive environments.
+    """
     print(LAG_BANNER)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Download (cached) ECHO Exporter
+    # Install warning-collector on the chemtreat logger tree so any
+    # WARNING the run emits (bot-block, throttle persistence,
+    # high-value-no-events) ends up in run_health.json for the viewer.
+    warning_collector = _health.WarningCollector()
+    chemtreat_logger = logging.getLogger("chemtreat")
+    chemtreat_logger.addHandler(warning_collector)
+    drilldown_stats: dict = {}
+
+    try:
+        _run_bulk_inner(out_dir, db_path, cache_dir, states, include_events,
+                        warning_collector, drilldown_stats)
+    finally:
+        chemtreat_logger.removeHandler(warning_collector)
+
+
+def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
+                    states: list[str] | None, include_events: bool,
+                    warning_collector: "_health.WarningCollector",
+                    drilldown_stats: dict) -> None:
+    # 1. Snapshot prior scores before any upsert. Used by
+    # `_drilldown_candidates` to spot newly-discovered facilities and
+    # facilities whose score jumped — both qualify for the fine-comb
+    # drill-down even when below the absolute score threshold.
+    prior_scores = _load_prior_scores(db_path)
+    log.info("Loaded %d prior facility scores for drill-down trigger", len(prior_scores))
+
+    # 2. Download (cached) ECHO Exporter
     exporter_zip = _download_cached(BULK_URLS["echo_exporter"],
                                     cache_dir, "echo_exporter")
 
-    # 2. Stream-filter to target NAICS + has water violation
+    # 3. Stream-filter: yield one row per (facility, program) emission.
+    # `_bulk_to_program_shapes` returns a separate raw dict per program
+    # — CWA dict has CWA keys only, SDWA dict has SDWA keys only — so
+    # the scorer's `or` fallbacks (e.g. CWPFormalEaCnt or Feas) can't
+    # mask SDWA values with CWA's "0" string.
     leads: list[dict] = []
     kept_registry_ids: set[str] = set()
-    for raw, api_shape in stream_echo_exporter(exporter_zip, TARGET_NAICS, states):
-        score, reasons = scoring.score_facility(api_shape)
-        # Determine primary program of interest. The ECHO Exporter rolls
-        # all programs into one row, so we pick based on which flag fired.
-        # If both, we duplicate the row (one per program).
-        for program, snc in [("CWA", api_shape["CWASNC"]),
-                             ("SDWA", api_shape["SDWASNC"])]:
-            if not _is_program_relevant(api_shape, program):
-                continue
-            leads.append({
-                "lead_score": score,
-                "score_reasons": " | ".join(reasons),
-                "program": program,
-                "registry_id": api_shape["RegistryID"],
-                "company": api_shape["FacName"],
-                "address": api_shape["FacStreet"],
-                "city": api_shape["FacCity"],
-                "state": api_shape["FacState"],
-                "zip": api_shape["FacZip"],
-                "county": api_shape["FacCounty"],
-                "naics": api_shape["FacNAICSCodes"],
-                "sic": api_shape["FacSICCodes"],
-                "permit_id": api_shape["SourceID"],
-                "snc_flag": snc,
-                "quarters_in_violation": api_shape["CWAQtrsWithNC"],
-                "formal_actions_5yr": (api_shape["CWAFormalActionCount"]
-                                       if program == "CWA"
-                                       else api_shape["SDWAFormalActionCount"]),
-                "last_penalty_usd": (api_shape["CWALastPenaltyAmt"]
-                                     if program == "CWA"
-                                     else api_shape["SDWALastPenaltyAmt"]),
-                "echo_url": ("https://echo.epa.gov/detailed-facility-report"
-                             f"?fid={api_shape['RegistryID']}"),
-            })
-            if api_shape["RegistryID"]:
-                kept_registry_ids.add(api_shape["RegistryID"])
-    leads.sort(key=lambda r: r["lead_score"], reverse=True)
-    log.info("Kept %d lead rows across %d unique facilities",
-             len(leads), len(kept_registry_ids))
+    kept_npdes_permits: set[str] = set()
+    kept_pwsids: set[str] = set()
+    permit_to_registry: dict[str, str] = {}
+    pwsid_to_registry: dict[str, str] = {}
 
-    # 3. Optionally drill into individual events from bulk CSVs
+    for raw_row, program, prog_raw in stream_echo_exporter(
+            exporter_zip, TARGET_NAICS, states):
+        # Score per-program (was per-row before — both programs shared
+        # one score, which made program-specific facility rules useless).
+        score, reasons = scoring.score_facility(prog_raw)
+        leads.append(_build_lead_row(prog_raw, program, score, reasons))
+
+        reg = prog_raw.get("RegistryID")
+        source = prog_raw.get("SourceID")
+        if reg:
+            kept_registry_ids.add(reg)
+        if program == "CWA" and source:
+            # NPDES_IDS in the exporter is sometimes a space-separated list.
+            for pid in str(source).split():
+                pid = pid.strip()
+                if pid:
+                    kept_npdes_permits.add(pid)
+                    if reg:
+                        permit_to_registry[pid] = reg
+        elif program == "SDWA" and source:
+            for pwsid in str(source).split():
+                pwsid = pwsid.strip()
+                if pwsid:
+                    kept_pwsids.add(pwsid)
+                    if reg:
+                        pwsid_to_registry[pwsid] = reg
+
+    leads.sort(key=lambda r: r["lead_score"], reverse=True)
+    log.info("Kept %d lead rows (%d CWA + %d SDWA) across %d unique facilities",
+             len(leads),
+             sum(1 for L in leads if L["program"] == "CWA"),
+             sum(1 for L in leads if L["program"] == "SDWA"),
+             len(kept_registry_ids))
+
+    # Initial tag computation against facility-only signals. This makes
+    # `tag_active_snc` etc. correct even in `--no-events` mode where no
+    # event-aware phase-2 ever runs. The full phase-2 augmentation below
+    # overwrites these once events arrive.
+    for lead in leads:
+        raw = lead.get("__raw") or {}
+        lead.update(scoring.compute_tags(raw))
+
+    # 4. Event load + drill-down — only when include_events is true.
+    # `--no-events` must produce facilities only, zero EPA calls.
     events: list[dict] = []
     if include_events:
         log.info("Downloading NPDES events…")
         try:
             npdes_zip = _download_cached(BULK_URLS["npdes"], cache_dir, "npdes")
-            events.extend(stream_npdes_violations(npdes_zip, kept_registry_ids))
+            events.extend(stream_npdes_violations(
+                npdes_zip, kept_registry_ids,
+                kept_npdes_permits, permit_to_registry,
+            ))
         except Exception as e:
             log.warning("NPDES bulk event load failed: %s", e)
 
         log.info("Downloading SDWA events…")
         try:
             sdwa_zip = _download_cached(BULK_URLS["sdwa"], cache_dir, "sdwa")
-            events.extend(stream_sdwa_violations(sdwa_zip, kept_registry_ids))
+            events.extend(stream_sdwa_violations(
+                sdwa_zip, kept_registry_ids,
+                kept_pwsids, pwsid_to_registry,
+            ))
         except Exception as e:
             log.warning("SDWA bulk event load failed: %s", e)
 
-    # 4. Persist to DB + write standing-state CSVs from DB.
-    # Same source-of-truth pattern as pipeline.py — see comments there.
+        # 4a. Phase-2 augmentation: re-score with events, set posture, set tags.
+        _augment_leads(leads, events)
+        leads.sort(key=lambda r: r["lead_score"], reverse=True)
+        log.info("Phase-2 (bulk-events) complete. %d leads scoring >= %d; "
+                 "%d with outreach_posture != no_events.",
+                 sum(1 for L in leads if L["lead_score"] >= EVENT_DRILLDOWN_MIN_SCORE),
+                 EVENT_DRILLDOWN_MIN_SCORE,
+                 sum(1 for L in leads if L["outreach_posture"] != "no_events"))
+
+        # 4b. API fine-comb fallback. Triggers: score≥threshold OR
+        # newly-discovered (no prior DB row) OR score jumped >10 since
+        # prior run. Bulk-only leads that already have events from
+        # this run are excluded by `_drilldown_candidates`.
+        candidates = _drilldown_candidates(leads, prior_scores)
+        drilldown_stats["candidates"] = len(candidates)
+        if candidates:
+            log.info("API fine-comb fallback: %d candidates "
+                     "(score>=%d / newly-discovered / score-jumped); "
+                     "drilling via echo_client...",
+                     len(candidates), EVENT_DRILLDOWN_MIN_SCORE)
+            end = datetime.utcnow().strftime("%m/%d/%Y")
+            start = (datetime.utcnow()
+                     - timedelta(days=LOOKBACK_DAYS)).strftime("%m/%d/%Y")
+            cwa_recovered = _drill_cwa(candidates, start, end, events,
+                                       inter_call_sleep=1.0, missed_out=None)
+            sdwa_recovered = _drill_sdwa(candidates, events,
+                                         inter_call_sleep=2.0, missed_out=None)
+            drilldown_stats["cwa_recovered"] = cwa_recovered
+            drilldown_stats["sdwa_recovered"] = sdwa_recovered
+            log.info("Fine-comb recovered events for %d CWA + %d SDWA leads",
+                     cwa_recovered, sdwa_recovered)
+
+            touched_keys = {(L["registry_id"], L["program"]) for L in candidates}
+            _augment_leads(leads, events, touched_keys=touched_keys)
+            leads.sort(key=lambda r: r["lead_score"], reverse=True)
+            still_missing = sum(1 for L in leads
+                                if L["lead_score"] >= EVENT_DRILLDOWN_MIN_SCORE
+                                and L["outreach_posture"] == "no_events")
+            drilldown_stats["still_missing_high_value"] = still_missing
+            if still_missing > 0:
+                log.warning("After fine-comb: %d high-value leads STILL "
+                            "no_events — API retries exhausted. These need "
+                            "manual follow-up.", still_missing)
+
+    # 5. Persist to DB + write standing-state CSVs from DB.
+    # Same source-of-truth pattern as pipeline.py.
     run_start_ts = datetime.utcnow().isoformat(timespec="seconds")
     with snapshot.open_db(db_path) as conn:
         fac_diff = snapshot.diff_and_upsert_facilities(conn, leads, now=run_start_ts)
         viol_diff = snapshot.diff_and_upsert_violations(conn, events, now=run_start_ts)
-        snapshot.record_run(conn, notes="bulk_loader", now=run_start_ts)
-        # 5. Write outputs
+        notes = f"bulk_loader{' --no-events' if not include_events else ''}"
+        snapshot.record_run(conn, notes=notes, now=run_start_ts)
         today = datetime.utcnow().strftime("%Y%m%d")
         _write_lag_notice(out_dir)
         snapshot.dump_facilities_csv(conn, out_dir / "all_leads.csv", run_start_ts)
@@ -413,23 +897,29 @@ def run_bulk(out_dir: Path,
     _write_csv(out_dir / f"newly_snc_{today}.csv", fac_diff["newly_snc"])
     _write_csv(out_dir / f"new_violations_{today}.csv", viol_diff["new"])
 
+    health_path = _health.write_run_health(
+        out_dir,
+        command="bulk_loader",
+        states=states,
+        include_events=include_events,
+        run_start_ts=run_start_ts,
+        leads=leads,
+        events=events,
+        fac_diff=fac_diff,
+        viol_diff=viol_diff,
+        drilldown_stats=drilldown_stats,
+        warnings=warning_collector.records,
+        event_drilldown_min_score=EVENT_DRILLDOWN_MIN_SCORE,
+        secondary_drilldown_min_score=SECONDARY_DRILLDOWN_MIN_SCORE,
+    )
+    log.info("Wrote run health to %s", health_path)
+
     log.info("Bulk run complete: %d leads, %d events, %d new facilities, "
              "%d newly SNC, %d new violations.",
              len(leads), len(events),
              len(fac_diff["new"]), len(fac_diff["newly_snc"]),
              len(viol_diff["new"]))
     print(LAG_BANNER)
-
-
-def _is_program_relevant(api_shape: dict, program: str) -> bool:
-    """Did the facility actually trip the chosen program's filters?
-    Prevents emitting an SDWA row for a pure CWA violator and vice versa."""
-    if program == "CWA":
-        return (str(api_shape.get("CWASNC") or "").upper() in ("Y", "S")
-                or _safe_int(api_shape.get("CWAQtrsWithNC")) > 0
-                or _safe_int(api_shape.get("CWAFormalActionCount")) > 0)
-    return (str(api_shape.get("SDWASNC") or "").upper() == "Y"
-            or _safe_int(api_shape.get("SDWAFormalActionCount")) > 0)
 
 
 # ----------------------------------------------------- CLI
