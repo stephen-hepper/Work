@@ -160,6 +160,66 @@ def _flatten_facility(raw: dict, program: str) -> dict:
     }
 
 
+def _drill_cwa(leads: list[dict], start: str, end: str,
+               events_out: list[dict],
+               inter_call_sleep: float,
+               missed_out: list[dict] | None) -> int:
+    """Drill CWA effluent exceedances for each lead in `leads`.
+
+    Appends new events to `events_out` (shared with the SDWA path).
+    Leads where the drill returned 0 events go into `missed_out` if
+    supplied — the caller uses that list to schedule a second pass.
+    Returns the count of leads that yielded ≥1 event.
+    """
+    drilled = 0
+    for lead in leads:
+        if lead["program"] != "CWA" or not lead.get("permit_id"):
+            continue
+        before = len(events_out)
+        try:
+            for ev in echo_client.fetch_npdes_violation_events(
+                    lead["permit_id"], start, end):
+                ev["registry_id"] = lead["registry_id"]
+                ev["program"] = "CWA"
+                ev["company"] = lead["company"]
+                ev["status"] = "Unresolved"
+                ev["data_lag_note"] = CWA_LAG_NOTE
+                events_out.append(ev)
+        except Exception as e:
+            log.warning("CWA event fetch failed for %s: %s", lead["permit_id"], e)
+        if len(events_out) > before:
+            drilled += 1
+        elif missed_out is not None:
+            missed_out.append(lead)
+        time.sleep(inter_call_sleep)
+    return drilled
+
+
+def _drill_sdwa(leads: list[dict], events_out: list[dict],
+                inter_call_sleep: float,
+                missed_out: list[dict] | None) -> int:
+    """Same pattern for SDWA leads via the DFR endpoint."""
+    drilled = 0
+    for lead in leads:
+        if lead["program"] != "SDWA" or not lead.get("registry_id"):
+            continue
+        before = len(events_out)
+        try:
+            for ev in echo_client.fetch_sdwa_violation_events(lead["registry_id"]):
+                ev["company"] = lead["company"]
+                ev["data_lag_note"] = SDWA_LAG_NOTE
+                events_out.append(ev)
+        except Exception as e:
+            log.warning("SDWA event fetch failed for %s: %s",
+                        lead["registry_id"], e)
+        if len(events_out) > before:
+            drilled += 1
+        elif missed_out is not None:
+            missed_out.append(lead)
+        time.sleep(inter_call_sleep)
+    return drilled
+
+
 def _write_csv(path: Path, rows: list[dict]) -> None:
     if not rows:
         log.info("(no rows for %s)", path.name)
@@ -235,46 +295,60 @@ def run(states: list[str], out_dir: Path, db_path: Path) -> None:
              len(high_value), EVENT_DRILLDOWN_MIN_SCORE)
 
     # 2a. CWA effluent exceedances (per-permit, fast endpoint)
-    cwa_drilled = 0
-    for lead in high_value:
-        if lead["program"] != "CWA" or not lead["permit_id"]:
-            continue
-        try:
-            for ev in echo_client.fetch_npdes_violation_events(
-                    lead["permit_id"], start, end):
-                ev["registry_id"] = lead["registry_id"]
-                ev["program"] = "CWA"
-                ev["company"] = lead["company"]
-                ev["status"] = "Unresolved"   # default; refine via DFR later
-                ev["data_lag_note"] = CWA_LAG_NOTE
-                events.append(ev)
-            cwa_drilled += 1
-            time.sleep(0.3)
-        except Exception as e:
-            log.warning("CWA event fetch failed for %s: %s", lead["permit_id"], e)
-    log.info("Drilled %d CWA permits", cwa_drilled)
+    cwa_missed: list[dict] = []   # leads we couldn't drill — second-pass candidates
+    cwa_drilled = _drill_cwa(high_value, start, end, events,
+                             inter_call_sleep=0.3, missed_out=cwa_missed)
+    log.info("Drilled %d CWA permits (%d missed; will retry)",
+             cwa_drilled, len(cwa_missed))
 
-    # 2b. SDWA violation history (per-system, via the DFR endpoint)
-    #
-    # The DFR is slower than get_effluent_chart - it returns the full
-    # cross-program facility report - so we only call it for high-scoring
-    # SDWA systems. The bundled sdwa_codes module translates EPA's numeric
-    # codes into human-readable categories before the rows land in `events`.
-    sdwa_drilled = 0
-    for lead in high_value:
-        if lead["program"] != "SDWA" or not lead["registry_id"]:
-            continue
-        try:
-            for ev in echo_client.fetch_sdwa_violation_events(lead["registry_id"]):
-                ev["company"] = lead["company"]
-                ev["data_lag_note"] = SDWA_LAG_NOTE
-                events.append(ev)
-            sdwa_drilled += 1
-            time.sleep(0.5)   # DFR is heavier; back off a bit more
-        except Exception as e:
-            log.warning("SDWA event fetch failed for %s: %s",
-                        lead["registry_id"], e)
-    log.info("Drilled %d SDWA systems", sdwa_drilled)
+    # 2b. SDWA violation history (per-system, via the DFR endpoint).
+    # DFR is heavier and throttles around call #15 at 0.5s pace — bumped
+    # to 1.0s inter-call sleep in the main pass; failed drilldowns get a
+    # second pass with even longer spacing.
+    sdwa_missed: list[dict] = []
+    sdwa_drilled = _drill_sdwa(high_value, events,
+                               inter_call_sleep=1.0, missed_out=sdwa_missed)
+    log.info("Drilled %d SDWA systems (%d missed; will retry)",
+             sdwa_drilled, len(sdwa_missed))
+
+    # 2c. Second-pass for any high-value lead that came back with 0 events.
+    # The thin/empty responses are usually transient EPA throttling — a
+    # longer wait between calls clears them. The user's stated goal is
+    # "drill down whenever needed so we don't miss violations," which is
+    # what this loop is for. Cost is bounded: only the misses get
+    # retried, with extra spacing.
+    if cwa_missed or sdwa_missed:
+        log.info("Second-pass drill-down: %d CWA + %d SDWA leads. "
+                 "Sleeping 10s first to let EPA throttle clear...",
+                 len(cwa_missed), len(sdwa_missed))
+        time.sleep(10)
+        if cwa_missed:
+            cwa_recovered = _drill_cwa(cwa_missed, start, end, events,
+                                       inter_call_sleep=1.0, missed_out=None)
+            log.info("Second-pass CWA recovered: %d of %d",
+                     cwa_recovered, len(cwa_missed))
+        if sdwa_missed:
+            sdwa_recovered = _drill_sdwa(sdwa_missed, events,
+                                         inter_call_sleep=2.0, missed_out=None)
+            log.info("Second-pass SDWA recovered: %d of %d",
+                     sdwa_recovered, len(sdwa_missed))
+
+    # Loud summary if drill-down miss rate is meaningful — sales-facing
+    # output is much weaker without per-event detail on high-value leads.
+    total_high = sum(1 for L in high_value
+                     if (L["program"] == "CWA" and L.get("permit_id"))
+                     or (L["program"] == "SDWA" and L.get("registry_id")))
+    drilled_keys = {(ev.get("registry_id"), ev.get("program")) for ev in events}
+    high_keys = {(L["registry_id"], L["program"]) for L in high_value}
+    still_missing = sum(1 for k in high_keys if k not in drilled_keys)
+    miss_pct = 100 * still_missing / max(total_high, 1)
+    if miss_pct > 5:
+        log.warning("DRILL-DOWN MISS RATE: %d/%d (%.1f%%) high-value leads "
+                    "have no events after second-pass. Top of CSV will "
+                    "show outreach_posture=no_events for these — score "
+                    "still reflects facility-level flags but per-event "
+                    "richness is missing.",
+                    still_missing, total_high, miss_pct)
 
     # ---- 2c. Phase-2 augmentation -------------------------------------
     #
@@ -302,17 +376,25 @@ def run(states: list[str], out_dir: Path, db_path: Path) -> None:
     # Re-sort: event-aware scoring may have shuffled the top.
     leads.sort(key=lambda r: r["lead_score"], reverse=True)
 
-    # ---- 3. Diff against last snapshot --------------------------------
+    # ---- 3. Persist to DB + write standing-state CSVs from DB ---------
+    #
+    # `snapshot.sqlite` is the source of truth: every column the CSV
+    # publishes lives in the DB. We capture one timestamp BEFORE any
+    # upsert and pass it to all three writers so the dump's
+    # `last_seen >= run_start_ts` filter catches every row this run
+    # touched (no microsecond drift between independent utcnow() calls).
+    run_start_ts = datetime.utcnow().isoformat(timespec="seconds")
     with snapshot.open_db(db_path) as conn:
-        fac_diff = snapshot.diff_and_upsert_facilities(conn, leads)
-        viol_diff = snapshot.diff_and_upsert_violations(conn, events)
-        snapshot.record_run(conn, notes=f"states={','.join(states)}")
-
-    # ---- 4. Write outputs ---------------------------------------------
-    today = datetime.utcnow().strftime("%Y%m%d")
-    _write_lag_notice(out_dir)
-    _write_csv(out_dir / "all_leads.csv", leads)
-    _write_csv(out_dir / "violation_events.csv", events)
+        fac_diff = snapshot.diff_and_upsert_facilities(conn, leads, now=run_start_ts)
+        viol_diff = snapshot.diff_and_upsert_violations(conn, events, now=run_start_ts)
+        snapshot.record_run(conn, notes=f"states={','.join(states)}", now=run_start_ts)
+        # ---- 4. Write outputs -----------------------------------------
+        today = datetime.utcnow().strftime("%Y%m%d")
+        _write_lag_notice(out_dir)
+        snapshot.dump_facilities_csv(conn, out_dir / "all_leads.csv", run_start_ts)
+        snapshot.dump_violations_csv(conn, out_dir / "violation_events.csv", run_start_ts)
+    # Delta CSVs come from in-memory diff dicts — they describe what
+    # CHANGED this run, which only the diff functions know.
     _write_csv(out_dir / f"new_facilities_{today}.csv", fac_diff["new"])
     _write_csv(out_dir / f"newly_snc_{today}.csv", fac_diff["newly_snc"])
     _write_csv(out_dir / f"new_violations_{today}.csv", viol_diff["new"])

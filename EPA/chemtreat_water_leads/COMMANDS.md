@@ -22,14 +22,19 @@ fresher data (weekly vs every-7-days cache).
 
 ## First-time setup
 
+The project lives under the uv-managed workspace at `Work/`:
+
 ```bash
-# Clone or unzip the package, then:
-cd chemtreat_water_leads
-pip install requests           # only external dependency
+cd ~/PycharmProjects/Work          # workspace with pyproject.toml + uv.lock
+uv sync                            # installs requests (only runtime dep)
+cd EPA                             # all run commands below assume CWD=EPA
 ```
 
-That's it. No API keys, no database setup, no config files. SQLite
-state lives in a single file you pass on the command line.
+If you don't use uv, plain `pip install requests` works too — that's
+still the only external dependency.
+
+No API keys, no database setup, no config files. SQLite state lives in
+a single file you pass on the command line.
 
 ---
 
@@ -247,6 +252,28 @@ After any run, the output directory contains:
 The `new_*` files are what sales actually opens each morning. The
 `all_leads.csv` is the standing inventory for territory planning.
 
+### Columns sales filters on
+
+`all_leads.csv` carries several columns specifically for slicing in
+Excel without parsing the score-reasons string:
+
+| Column | Type | Use |
+|---|---|---|
+| `lead_score` | int | Total of facility + event rule contributions (uncapped). Sort descending. |
+| `score_reasons` | string | Pipe-separated breakdown like `+40: SNC \| +32: 6 quarter(s) ... \| -30: All drilled events Resolved/Archived`. Negative entries demote do-not-call facilities. |
+| `outreach_posture` | enum | One word per facility — `active`, `enforcement_underway`, `verify_first`, `historical`, `no_events`. The one-glance "should I call?" indicator. |
+| `tag_active_snc` | bool | Facility currently flagged Significant Non-Complier. |
+| `tag_treatment_technique` | bool | Active Treatment Technique violation in events (highest ChemTreat-relevance category). |
+| `tag_mcl_violation` | bool | Active MCL violation (health-based). |
+| `tag_lead_copper` | bool | Active Lead/Copper Rule violation or facility-level Pb/Cu flag. |
+| `tag_major_facility` | bool | NPDES "Major" permit (high flow / high load — CWA only). |
+| `tag_only_resolved_events` | bool | Has drilled events, all Resolved/Archived. Sales should verify or skip. |
+| `tag_chemtreat_high_relevance` | bool | Composite: any of `active_snc / treatment_technique / mcl_violation / lead_copper` AND not `only_resolved_events`. The "if a rep had one filter, this is it" column. |
+
+The HTML viewer in `../chemtreat_water_leads_viewer/index.html` reads
+these columns directly — open it in a browser and use the Upload CSV
+button to load `all_leads.csv` (and optionally `violation_events.csv`).
+
 ---
 
 ## Sanity-check times if yours are way off
@@ -257,9 +284,17 @@ If a regional run is taking **much** longer than the estimates above:
   large runs sometimes slow down. The 0.4s sleep in `pipeline.py` is
   meant to keep us under the threshold; increase it if you see HTTP
   errors in the log.
+- **DFR throttle stubs:** the per-facility DFR endpoint is the
+  pickiest. EPA sometimes returns a 200 with a stub `Results` dict
+  (only a few keys) instead of the usual ~50; the client detects this
+  by key density and retries once with a 2-second backoff
+  (see `DFR_RETRY_BACKOFF_SEC` in `echo_client.py`). If you see many
+  retries in `-v` output, raise `EVENT_DRILLDOWN_MIN_SCORE` to cut the
+  drill-down count or extend the inter-drill sleep.
 - **Drill-down volume:** if you have hundreds of high-scoring leads,
-  the per-permit `get_effluent_chart` calls dominate. Tune
-  `EVENT_DRILLDOWN_MIN_SCORE` in `pipeline.py` upward to limit the count.
+  the per-permit `get_effluent_chart` and per-system DFR calls
+  dominate. Tune `EVENT_DRILLDOWN_MIN_SCORE` in `pipeline.py` upward
+  to limit the count.
 - **Network egress:** the bulk loader downloads ~370 MB total on a
   first run. Behind a slow corporate firewall this can be the
   bottleneck.

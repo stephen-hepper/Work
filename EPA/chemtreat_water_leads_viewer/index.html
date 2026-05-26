@@ -297,6 +297,17 @@
     text-align: center;
     color: #fff;
   }
+  .score-badge.s110 {
+    background: #6b1611;
+    box-shadow: 0 0 0 2px #f5c518 inset;
+    padding-right: 4px;
+  }
+  .score-badge.s110::after {
+    content: " ★";
+    color: #f5c518;
+    font-size: 11px;
+    margin-left: 2px;
+  }
   .score-badge.s80 { background: var(--danger); }
   .score-badge.s60 { background: var(--orange); }
   .score-badge.s40 { background: var(--yellow); color: #4a3a00; }
@@ -590,7 +601,7 @@
     <div class="filter-group">
       <label>Min score</label>
       <div class="slider-row">
-        <input type="range" id="filterScore" min="0" max="100" step="5" value="0" />
+        <input type="range" id="filterScore" min="0" max="180" step="5" value="0" />
         <span class="slider-value" id="filterScoreValue">0</span>
       </div>
     </div>
@@ -913,9 +924,10 @@ let isDemoData = true;
 
 /* ---------- Helpers ---------- */
 function scoreClass(s) {
-  if (s >= 80) return "s80";
-  if (s >= 60) return "s60";
-  if (s >= 40) return "s40";
+  if (s >= 110) return "s110";   // outlier: facility + event rules stacking
+  if (s >= 80)  return "s80";
+  if (s >= 60)  return "s60";
+  if (s >= 40)  return "s40";
   return "s0";
 }
 function fmtMoney(n) {

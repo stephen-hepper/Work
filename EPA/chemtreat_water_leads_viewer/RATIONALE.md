@@ -20,6 +20,35 @@ out.
 
 ---
 
+## Where the CSVs come from (as of 2026-05-22)
+
+`all_leads.csv` and `violation_events.csv` are produced by SELECTing
+from `../snapshot.sqlite` at end of pipeline run, not by writing
+in-memory state to disk. The DB is the single source of truth; the
+CSVs are a viewer-shaped view of it. Implications for this viewer:
+
+- **Column shape is locked** to the explicit `FAC_CSV_COLUMNS` /
+  `VIOL_CSV_COLUMNS` lists in `snapshot.py`, not to whatever Python
+  dict the previous pipeline run happened to assemble. So the
+  viewer's column references (in `setLeads`, `renderDetail`, upload
+  detection) are now contractual.
+- **`violation_events.csv` always carries the union of CWA + SDWA
+  columns** even when only one program produced events this run.
+  The viewer's `renderEvents()` already picks the right title via
+  `parameter || violation_description || contaminant`, so the extra
+  empty cells are harmless.
+- **`tag_*` columns serialize as `"True"`/`"False"` strings** to
+  match the legacy DictWriter output. The viewer doesn't read them
+  today, but anyone wiring them up should expect strings, not
+  booleans.
+- **Violations without a `violation_id` are dropped** by the
+  pipeline's dedupe — they cannot be diffed across runs and so they
+  never reach the DB. If a future event source emits IDless rows
+  and sales asks why they're missing, the fix lives in the
+  pipeline's fetch step, not in the viewer.
+
+---
+
 ## Hard constraints honored from the parent project
 
 These come from `../chemtreat_water_leads/MEMORY.md` and `README.md`:

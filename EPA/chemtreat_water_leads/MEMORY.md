@@ -182,13 +182,17 @@ equipment (336), hospitals (622), oil & gas extraction (2111), mining
 Edit `TARGET_NAICS` if sales gives you feedback. It's a marketing
 decision, not a technical one.
 
-### Scoring rules (`scoring.RULES`):
+### Scoring rules (`scoring.RULES` + `scoring.EVENT_RULES`):
 
 Hand-curated, intentionally simple, fully explainable. Each rule returns
 `(points, reason_string)` or `None`. The total score lands in the CSV
 along with a `score_reasons` column — sales can audit any score.
 
-Current point allocations:
+Two rule families. Facility rules run on every lead (cheap, summary
+fields from `get_qid`). Event rules run after the high-score drill-down
+and inspect the actual violation events.
+
+**Facility rules** (`RULES`):
 - SNC flag: 40 (strongest single signal)
 - Quarters in non-compliance: 8 each, capped at 32
 - Formal enforcement action: 15
@@ -196,8 +200,27 @@ Current point allocations:
 - Recent penalty: 5–8
 - Recent inspection: 5
 
+**Event rules** (`EVENT_RULES`, applied to facilities scoring ≥50
+after they've been drilled):
+- Open events (Unaddressed/Unresolved): 5 each, capped at 25
+- Active Treatment Technique violation: 20 (single highest-relevance
+  category for ChemTreat — what their chemistry fixes)
+- Active MCL violation: 15
+- Active Lead/Copper Rule: 10 (event-level) or 5 (facility-flag fallback)
+- All-resolved demote: **−30** (if a facility has events but every one is
+  Resolved/Archived, push it well below actively-open peers so sales
+  doesn't accidentally cold-call about a fixed issue)
+
+**No `MAX_SCORE` cap as of 2026-05-21.** The previous 100-point ceiling
+collapsed the top of the distribution (99 facilities tied at 87 in a TX
+run). Removing it lets genuine outliers stand out — top score on a
+fresh TX+VA+LA run was 142, with only 5 leads above 100. Theoretical
+max ≈ 180 if every facility + event rule fires. Viewer's color tiers
+(`scoreClass` in `index.html`) reflect this: ≥110 = outlier (star
+badge), ≥80 = red, ≥60 = orange, ≥40 = yellow.
+
 **Don't replace these with ML.** Sales needs to be able to look at a row
-and say "this is an 82 because…." Interpretability matters more than
+and say "this is a 142 because…." Interpretability matters more than
 marginal AUC improvement.
 
 ### SDWA violation categories (in `sdwa_codes.py`)
@@ -317,23 +340,53 @@ keeps us under 100 MB and runs in similar time.
 
 ## SQLite snapshot — what it's for and what NOT to do
 
-`snapshot.py` exists so that the daily output is *diffs*, not the
-standing inventory. First run: everything is "new" (DB is empty); the
-`new_*.csv` files will be enormous. Second run onward: only actual deltas
-land in `new_*.csv`, which is what sales actually opens each morning.
+`snapshot.sqlite` is **the source of truth** for everything the CSVs
+publish. Two roles, one file:
 
-**Critical rule: do not delete `snapshot.sqlite` between runs** unless
-you want to reset the baseline. Losing it means every facility looks
-"new" again. The cron pattern in `COMMANDS.md` is explicit about
-preserving the DB path across runs.
+1. **Diff engine.** Each run compares current state to the DB and
+   emits `new_facilities_*.csv`, `newly_snc_*.csv`,
+   `new_violations_*.csv` — the deltas sales opens each morning.
+2. **Standing inventory.** Every column in `all_leads.csv` and
+   `violation_events.csv` lives in the DB. At end of run, those two
+   CSVs are produced by SELECTing from the DB (filtered to rows whose
+   `last_seen` matches the current run's start timestamp), not from
+   in-memory pipeline state.
 
-The schema is:
-- `facilities` (registry_id, program) — one row per facility-program pair
-- `violations` (violation_id) — one row per individual violation event
-- `runs` — run history for auditing
+**Critical rule: do not delete `snapshot.sqlite` between runs.** Two
+things break if you do:
+- Diff baseline resets — every facility looks "new" again.
+- The standing-inventory CSVs are empty until the next pipeline run
+  completes a full territory scan. Anyone who opens `all_leads.csv`
+  in the interim will see nothing.
 
-Adding columns is fine; just `ALTER TABLE` in the schema string with
-`IF NOT EXISTS` or use a migration step.
+The cron pattern in `COMMANDS.md` preserves the DB path across runs.
+
+**Schema** lives in `snapshot.py` as two ordered dicts
+(`FAC_COLUMNS`, `VIOL_COLUMNS`) that double as the migration source
+and the CSV column order. To add a column: append to the relevant
+dict. On next `open_db()`, `_migrate(conn)` runs `ALTER TABLE … ADD
+COLUMN` for any column not already present in the live DB.
+Idempotent on fresh and legacy DBs.
+
+Tables:
+- `facilities` PK `(registry_id, program)` — ~38 columns, every CSV
+  field + `first_seen`/`last_seen` bookkeeping + legacy `snc_flag`
+  (retained for diff comparisons).
+- `violations` PK `violation_id` — ~29 columns, union of CWA-shaped
+  (parameter, limit/dmr values, exceedance_pct, npdes_id, stat_basis)
+  and SDWA-shaped (violation_code, contaminant, rule_family, etc.).
+- `runs` — run history for auditing.
+
+**Behavioral note.** Violations without a `violation_id` are silently
+dropped (cannot dedupe across runs without an ID). This was true
+before the refactor too; flagged for visibility. If sales reports
+missing rows, the fix is to synthesize an ID upstream in the
+event-fetch step, not paper over it in the dump.
+
+**Concurrency.** Two runs against the same DB at the same time would
+interleave `last_seen` updates and corrupt the dump filter. Runs must
+be serial. Cron serializes by default; ad-hoc users should not run
+two pipelines side-by-side.
 
 ---
 

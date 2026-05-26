@@ -44,12 +44,48 @@ TIMEOUT = 60          # seconds; some queries are slow when EPA is busy
 DEFAULT_PAGE = 500    # API hard cap is around 1000; 500 is safer
 
 # DFR throttle detection. When EPA throttles us, the DFR endpoint returns
-# HTTP 200 with valid JSON but a stub Results object — typically just a few
-# keys (Message, RegistryID, maybe Permits) instead of the usual 40-50.
-# Heuristic: if Results has fewer than this many keys AND no violations were
-# found, treat the response as throttled and retry once.
+# HTTP 200 with valid JSON but a stub Results object — typically just 1
+# key instead of the usual ~55. Real "no violations" responses come back
+# with the full envelope, so key-density distinguishes throttle from
+# legitimate emptiness.
+#
+# Empirically (2026-05-22): DFR throttles around call #15 at 0.5s pace.
+# Once throttled, the previous 2s single-retry wasn't enough; bumped to
+# (5, 15, 45) to match the general bot-block schedule.
 DFR_THROTTLE_KEY_THRESHOLD = 10
-DFR_RETRY_BACKOFF_SEC = 2.0
+DFR_RETRY_BACKOFF_SCHEDULE = (5, 15, 45)   # seconds; tried in order on thin response
+
+# General bot-block detection. When EPA detects a "robotic or programmed
+# query" (their phrasing) anywhere in echodata.epa.gov, it returns HTTP 200
+# with `{"Error": {"ErrorMessage": "Your query has been identified as a
+# robotic or programmed query, and has been blocked..."}}` instead of the
+# usual `{"Results": {...}}`. The block clears in ~5–10 seconds. See
+# MEMORY.md "EPA bot-block" entry for the discovery context.
+BOT_BLOCK_SUBSTRING = "robotic or programmed query"
+BOT_BLOCK_BACKOFF_SCHEDULE = (5, 15, 45)   # seconds between retries
+
+# EPA's docs ask that programmatic clients identify themselves so traffic
+# can be attributed. Without this header, our calls look like an
+# unidentified scraper, which raises the bot-block probability.
+USER_AGENT = (
+    "chemtreat-water-leads/1.0 (lead-gen tool; "
+    "https://github.com/chemtreat/water-leads)"
+)
+
+
+class EpaBotBlocked(RuntimeError):
+    """Raised when ECHO's bot-block response persists across all retries.
+    The caller can choose to fail the whole run or skip the offending
+    state and continue."""
+
+
+def _looks_bot_blocked(payload: dict) -> bool:
+    """True if `payload` is the EPA 'robotic query' error envelope."""
+    err = payload.get("Error")
+    if not isinstance(err, dict):
+        return False
+    msg = str(err.get("ErrorMessage") or "")
+    return BOT_BLOCK_SUBSTRING in msg.lower()
 
 
 # ----------------------------------------------------- column metadata
@@ -168,19 +204,56 @@ def _build_qcolumns(service: str, wanted: list[str]) -> str:
 
 # --------------------------------------------------------------------- core
 
+_session: requests.Session | None = None
+
+
+def _get_session() -> requests.Session:
+    """Lazily-built shared session so EPA can attribute our traffic and
+    we don't pay TCP/TLS overhead on every call."""
+    global _session
+    if _session is None:
+        s = requests.Session()
+        s.headers.update({"User-Agent": USER_AGENT, "Accept": "application/json"})
+        _session = s
+    return _session
+
+
 def _get(path: str, params: dict[str, Any]) -> dict:
     """One place to do HTTP. All callers go through here so retries,
-    logging, and error handling stay in a single function."""
+    logging, and error handling stay in a single function.
+
+    When EPA returns its "robotic or programmed query" bot-block (HTTP
+    200 with `{"Error": {...}}` instead of the usual `{"Results": ...}`),
+    we sleep through the BOT_BLOCK_BACKOFF_SCHEDULE and retry. The block
+    typically clears in ~5s but we give it room to ride out longer
+    intermittent blocks. After all retries fail we raise EpaBotBlocked
+    so the caller sees a loud error, not a silent empty result.
+    """
     params = {**params, "output": "JSON"}
     url = f"{BASE}/{path}"
-    log.debug("GET %s %s", url, params)
-    r = requests.get(url, params=params, timeout=TIMEOUT)
-    r.raise_for_status()
-    try:
-        return r.json()
-    except ValueError:
-        # EPA occasionally returns HTML when overloaded; surface that clearly
-        raise RuntimeError(f"Non-JSON response from {url}: {r.text[:200]}")
+    session = _get_session()
+
+    for attempt, backoff in enumerate((0,) + BOT_BLOCK_BACKOFF_SCHEDULE):
+        if backoff:
+            log.warning("ECHO bot-block detected; sleeping %ds before retry %d/%d",
+                        backoff, attempt, len(BOT_BLOCK_BACKOFF_SCHEDULE))
+            time.sleep(backoff)
+        log.debug("GET %s %s", url, params)
+        r = session.get(url, params=params, timeout=TIMEOUT)
+        r.raise_for_status()
+        try:
+            payload = r.json()
+        except ValueError:
+            # EPA occasionally returns HTML when overloaded; surface clearly.
+            raise RuntimeError(f"Non-JSON response from {url}: {r.text[:200]}")
+        if _looks_bot_blocked(payload):
+            continue
+        return payload
+
+    raise EpaBotBlocked(
+        f"ECHO bot-block persisted after {len(BOT_BLOCK_BACKOFF_SCHEDULE)} retries "
+        f"on {url}. Increase BOT_BLOCK_BACKOFF_SCHEDULE or reduce request rate."
+    )
 
 
 # --------------------------------------------------------- facility search
@@ -397,9 +470,17 @@ def _qid_workflow(
         total = 0
 
     if not qid:
+        # The bot-block path is handled in `_get` via retry; if we still
+        # have no QID here it's either a 0-result query or a genuinely
+        # malformed request. Dump enough of the raw response that the
+        # next debugger doesn't have to instrument anything.
         msg = results.get("Message") or results.get("Error") or "unknown"
-        log.warning("ECHO %s: no facility array AND no QID (msg=%r). "
-                    "Endpoint or params may be wrong.", init_endpoint, msg)
+        log.warning(
+            "ECHO %s: no facility array AND no QID (msg=%r, top_keys=%s, "
+            "raw_init=%s). Endpoint or params may be wrong.",
+            init_endpoint, msg, list(results.keys())[:10],
+            str(init_data)[:400],
+        )
         return []
 
     if total == 0:
@@ -413,11 +494,18 @@ def _qid_workflow(
     # Build qcolumns string so EPA returns the columns we actually need.
     qcolumns = _build_qcolumns(service, wanted_columns or []) if wanted_columns else ""
 
-    # Step 2: paginate via get_qid
+    # Step 2: paginate via get_qid.
+    # Sleep briefly between pages — pagination has no built-in throttle
+    # (unlike the per-NAICS sleep in pipeline.py), and a long paginate
+    # of a large state was what tripped EPA's bot-block in the first
+    # place. 0.3s keeps us under the threshold without meaningfully
+    # slowing nationwide runs.
     all_rows: list[dict] = []
     page = 1
     max_pages = 200   # hard cap to avoid runaway loops
     while page <= max_pages and len(all_rows) < total:
+        if page > 1:
+            time.sleep(0.3)
         page_params = {
             "qid": qid,
             "pageno": page,
@@ -553,7 +641,16 @@ def fetch_sdwa_violation_events(registry_id: str) -> list[dict]:
     # them apart and retry once on suspected throttle.
     raw_violations: list[dict] = []
     results: dict = {}
-    for attempt in range(2):
+    # Attempt 0 is the initial call; subsequent attempts are throttle
+    # retries with progressively longer sleeps from
+    # DFR_RETRY_BACKOFF_SCHEDULE. We only retry on "thin response" (the
+    # throttle signal) — substantive empty responses are the truth.
+    attempts = (0,) + DFR_RETRY_BACKOFF_SCHEDULE
+    for attempt, backoff in enumerate(attempts):
+        if backoff:
+            log.debug("DFR %s: thin response previously; sleeping %ds before retry %d/%d",
+                      registry_id, backoff, attempt, len(DFR_RETRY_BACKOFF_SCHEDULE))
+            time.sleep(backoff)
         data = _get("dfr_rest_services.get_dfr", {"p_id": registry_id})
         results = data.get("Results", {}) or {}
 
@@ -566,20 +663,23 @@ def fetch_sdwa_violation_events(registry_id: str) -> list[dict]:
 
         if raw_violations:
             break
-        # No violations found - decide whether to retry. If the response is
-        # substantive (lots of top-level keys), the empty Violations list is
-        # the truth and we don't waste a retry. If it's thin, EPA likely
-        # throttled and the retry usually recovers.
-        if attempt == 0 and len(results) < DFR_THROTTLE_KEY_THRESHOLD:
-            log.debug("DFR %s: thin response (%d keys); retrying after %.1fs",
-                      registry_id, len(results), DFR_RETRY_BACKOFF_SEC)
-            time.sleep(DFR_RETRY_BACKOFF_SEC)
-            continue
-        break
+        # If response is substantive (lots of top-level keys), the empty
+        # Violations list is the truth — don't waste retries. If thin
+        # AND we have retries left, loop again.
+        if len(results) >= DFR_THROTTLE_KEY_THRESHOLD:
+            break
 
     if not raw_violations:
-        log.debug("No SDWA violations found in DFR for %s (Results has %d keys)",
-                  registry_id, len(results))
+        # Distinguish "throttle persisted across all retries" (loud warning;
+        # the caller should second-pass these) from "genuinely no events"
+        # (debug log; expected for clean facilities).
+        if len(results) < DFR_THROTTLE_KEY_THRESHOLD:
+            log.warning("DFR %s: throttle persisted across all retries — "
+                        "no events drilled. Consider second-pass.",
+                        registry_id)
+        else:
+            log.debug("No SDWA violations found in DFR for %s (Results has %d keys)",
+                      registry_id, len(results))
         return []
 
     events: list[dict] = []

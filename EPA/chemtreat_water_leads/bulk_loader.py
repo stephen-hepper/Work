@@ -397,17 +397,18 @@ def run_bulk(out_dir: Path,
         except Exception as e:
             log.warning("SDWA bulk event load failed: %s", e)
 
-    # 4. Diff against snapshot DB (same logic as API pipeline)
+    # 4. Persist to DB + write standing-state CSVs from DB.
+    # Same source-of-truth pattern as pipeline.py — see comments there.
+    run_start_ts = datetime.utcnow().isoformat(timespec="seconds")
     with snapshot.open_db(db_path) as conn:
-        fac_diff = snapshot.diff_and_upsert_facilities(conn, leads)
-        viol_diff = snapshot.diff_and_upsert_violations(conn, events)
-        snapshot.record_run(conn, notes="bulk_loader")
-
-    # 5. Write outputs
-    today = datetime.utcnow().strftime("%Y%m%d")
-    _write_lag_notice(out_dir)
-    _write_csv(out_dir / "all_leads.csv", leads)
-    _write_csv(out_dir / "violation_events.csv", events)
+        fac_diff = snapshot.diff_and_upsert_facilities(conn, leads, now=run_start_ts)
+        viol_diff = snapshot.diff_and_upsert_violations(conn, events, now=run_start_ts)
+        snapshot.record_run(conn, notes="bulk_loader", now=run_start_ts)
+        # 5. Write outputs
+        today = datetime.utcnow().strftime("%Y%m%d")
+        _write_lag_notice(out_dir)
+        snapshot.dump_facilities_csv(conn, out_dir / "all_leads.csv", run_start_ts)
+        snapshot.dump_violations_csv(conn, out_dir / "violation_events.csv", run_start_ts)
     _write_csv(out_dir / f"new_facilities_{today}.csv", fac_diff["new"])
     _write_csv(out_dir / f"newly_snc_{today}.csv", fac_diff["newly_snc"])
     _write_csv(out_dir / f"new_violations_{today}.csv", viol_diff["new"])
