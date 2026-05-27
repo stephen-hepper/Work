@@ -163,19 +163,34 @@ def _flatten_facility(raw: dict, program: str) -> dict:
 def _drill_cwa(leads: list[dict], start: str, end: str,
                events_out: list[dict],
                inter_call_sleep: float,
-               missed_out: list[dict] | None) -> int:
+               missed_out: list[dict] | None,
+               failed_out: set | None = None) -> int:
     """Drill CWA effluent exceedances for each lead in `leads`.
 
     Appends new events to `events_out` (shared with the SDWA path).
     Leads where the drill returned 0 events go into `missed_out` if
     supplied — the caller uses that list to schedule a second pass.
     Returns the count of leads that yielded ≥1 event.
+
+    `failed_out`, if supplied, records the `(registry_id, program)` of any
+    lead whose drill *raised* (timeout / connection drop / bot-block) — as
+    opposed to returning cleanly with no rows. The two outcomes look
+    identical in `missed_out`, but mean very different things to a user:
+    a raised drill is incomplete and worth re-running, while a clean-empty
+    one usually means the facility genuinely has no effluent exceedances on
+    file (e.g. reporting-only or stormwater-general-permit noncompliance).
+    Pass the same set through every pass; a later success/clean-empty
+    discards a key added by an earlier failed attempt, so the set reflects
+    each lead's *final* outcome. (A silently-throttled HTTP-200-empty
+    response can't be told from genuine no-data here and counts as the
+    latter — the effluent endpoint has no stub signature like DFR's.)
     """
     drilled = 0
     for lead in leads:
         if lead["program"] != "CWA" or not lead.get("permit_id"):
             continue
         before = len(events_out)
+        errored = False
         try:
             for ev in echo_client.fetch_npdes_violation_events(
                     lead["permit_id"], start, end):
@@ -186,36 +201,53 @@ def _drill_cwa(leads: list[dict], start: str, end: str,
                 ev["data_lag_note"] = CWA_LAG_NOTE
                 events_out.append(ev)
         except Exception as e:
+            errored = True
             log.warning("CWA event fetch failed for %s: %s", lead["permit_id"], e)
         if len(events_out) > before:
             drilled += 1
         elif missed_out is not None:
             missed_out.append(lead)
+        if failed_out is not None:
+            key = (lead["registry_id"], lead["program"])
+            failed_out.add(key) if errored else failed_out.discard(key)
         time.sleep(inter_call_sleep)
     return drilled
 
 
 def _drill_sdwa(leads: list[dict], events_out: list[dict],
                 inter_call_sleep: float,
-                missed_out: list[dict] | None) -> int:
-    """Same pattern for SDWA leads via the DFR endpoint."""
+                missed_out: list[dict] | None,
+                failed_out: set | None = None) -> int:
+    """Same pattern for SDWA leads via the DFR endpoint.
+
+    `failed_out` semantics match `_drill_cwa`: it records leads whose drill
+    raised (vs. returned cleanly empty). The DFR path does detect silent
+    throttle stubs and raises a warning, but `fetch_sdwa_violation_events`
+    swallows that into a `[]` return, so here too only a raised exception
+    (connection drop / read timeout) marks a lead as failed.
+    """
     drilled = 0
     for lead in leads:
         if lead["program"] != "SDWA" or not lead.get("registry_id"):
             continue
         before = len(events_out)
+        errored = False
         try:
             for ev in echo_client.fetch_sdwa_violation_events(lead["registry_id"]):
                 ev["company"] = lead["company"]
                 ev["data_lag_note"] = SDWA_LAG_NOTE
                 events_out.append(ev)
         except Exception as e:
+            errored = True
             log.warning("SDWA event fetch failed for %s: %s",
                         lead["registry_id"], e)
         if len(events_out) > before:
             drilled += 1
         elif missed_out is not None:
             missed_out.append(lead)
+        if failed_out is not None:
+            key = (lead["registry_id"], lead["program"])
+            failed_out.add(key) if errored else failed_out.discard(key)
         time.sleep(inter_call_sleep)
     return drilled
 
@@ -332,10 +364,17 @@ def _run_inner(states: list[str], out_dir: Path, db_path: Path,
     log.info("Drilling into events for %d high-value leads (score >= %d)",
              len(high_value), EVENT_DRILLDOWN_MIN_SCORE)
 
+    # Leads whose FINAL drill attempt raised (timeout/connection/bot-block),
+    # as opposed to returning cleanly empty. Drives the run-health split
+    # between "re-run these" and "genuinely no data on file". Shared across
+    # both passes; a later success/clean-empty clears an earlier failure.
+    failed_keys: set = set()
+
     # 2a. CWA effluent exceedances (per-permit, fast endpoint)
     cwa_missed: list[dict] = []   # leads we couldn't drill — second-pass candidates
     cwa_drilled = _drill_cwa(high_value, start, end, events,
-                             inter_call_sleep=0.3, missed_out=cwa_missed)
+                             inter_call_sleep=0.3, missed_out=cwa_missed,
+                             failed_out=failed_keys)
     log.info("Drilled %d CWA permits (%d missed; will retry)",
              cwa_drilled, len(cwa_missed))
 
@@ -345,7 +384,8 @@ def _run_inner(states: list[str], out_dir: Path, db_path: Path,
     # second pass with even longer spacing.
     sdwa_missed: list[dict] = []
     sdwa_drilled = _drill_sdwa(high_value, events,
-                               inter_call_sleep=1.0, missed_out=sdwa_missed)
+                               inter_call_sleep=1.0, missed_out=sdwa_missed,
+                               failed_out=failed_keys)
     log.info("Drilled %d SDWA systems (%d missed; will retry)",
              sdwa_drilled, len(sdwa_missed))
 
@@ -362,12 +402,14 @@ def _run_inner(states: list[str], out_dir: Path, db_path: Path,
         time.sleep(10)
         if cwa_missed:
             cwa_recovered = _drill_cwa(cwa_missed, start, end, events,
-                                       inter_call_sleep=1.0, missed_out=None)
+                                       inter_call_sleep=1.0, missed_out=None,
+                                       failed_out=failed_keys)
             log.info("Second-pass CWA recovered: %d of %d",
                      cwa_recovered, len(cwa_missed))
         if sdwa_missed:
             sdwa_recovered = _drill_sdwa(sdwa_missed, events,
-                                         inter_call_sleep=2.0, missed_out=None)
+                                         inter_call_sleep=2.0, missed_out=None,
+                                         failed_out=failed_keys)
             log.info("Second-pass SDWA recovered: %d of %d",
                      sdwa_recovered, len(sdwa_missed))
 
@@ -387,6 +429,11 @@ def _run_inner(states: list[str], out_dir: Path, db_path: Path,
                     "still reflects facility-level flags but per-event "
                     "richness is missing.",
                     still_missing, total_high, miss_pct)
+
+    # Classify the misses (failed-lookup vs no-data-on-file) for the Run
+    # Health tab so the viewer can tell users what to re-run vs ignore.
+    drilldown_stats = _health.summarize_drilldown(
+        high_value, events, failed_keys, leads)
 
     # ---- 2c. Phase-2 augmentation -------------------------------------
     #
@@ -449,7 +496,7 @@ def _run_inner(states: list[str], out_dir: Path, db_path: Path,
         events=events,
         fac_diff=fac_diff,
         viol_diff=viol_diff,
-        drilldown_stats=None,
+        drilldown_stats=drilldown_stats,
         warnings=warning_collector.records,
         event_drilldown_min_score=EVENT_DRILLDOWN_MIN_SCORE,
         secondary_drilldown_min_score=EVENT_DRILLDOWN_MIN_SCORE,

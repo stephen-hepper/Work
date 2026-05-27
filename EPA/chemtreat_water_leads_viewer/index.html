@@ -1281,6 +1281,29 @@ function statusTooltip(status) {
   }
 }
 
+/* True if this lead's drill-down RAISED this run (timeout / connection /
+ * bot-block), per run_health's drilldown.lookup_failed_keys (schema v2+).
+ * Lets a NoEvents lead distinguish "lookup failed, re-run" from "no records
+ * on file". Returns false when no v2 health is loaded (we can't tell). */
+function leadLookupFailed(r) {
+  const keys = health && health.drilldown && health.drilldown.lookup_failed_keys;
+  return Array.isArray(keys) && keys.indexOf(`${r.registry_id}|${r.program}`) !== -1;
+}
+
+/* Posture-box body text. For NoEvents we branch on whether the drill failed
+ * vs. came back empty — but only when v2 run_health tells us which; without
+ * it we fall back to the neutral postureText() copy. */
+function postureExplain(r) {
+  const haveBreakdown = health && health.drilldown
+    && Array.isArray(health.drilldown.lookup_failed_keys);
+  if (r.status === "NoEvents" && haveBreakdown) {
+    return leadLookupFailed(r)
+      ? "Lookup didn't complete this run (EPA throttling / network error), so the empty event list below may be incomplete. Re-run the pipeline for this state, or check this facility on ECHO before relying on it."
+      : "No event-level records were returned for this facility. That's common for reporting-only or stormwater general-permit noncompliance, which carry no effluent exceedances to show — the score still reflects EPA's facility-level flags (SNC, formal actions, quarters in non-compliance). Verify on ECHO before outreach.";
+  }
+  return postureText(r.status);
+}
+
 /* The pipeline emits an `outreach_posture` column on all_leads.csv with values
  * { active, enforcement_underway, verify_first, historical, no_events }. The
  * viewer's existing status-pill / posture-box / filter-chip vocabulary is
@@ -1502,7 +1525,7 @@ function renderDetail(r) {
       </ul>
       <div class="posture-box posture-${escapeHtml(r.status)}">
         <div class="posture-title">Outreach posture &mdash; ${escapeHtml(r.status)}</div>
-        <div>${escapeHtml(postureText(r.status))}</div>
+        <div>${escapeHtml(postureExplain(r))}</div>
       </div>
     </div>
     <div>
@@ -1548,7 +1571,9 @@ function renderDetail(r) {
 
 function setHealth(data) {
   // Refuse unknown schema versions so we don't render stale fields silently.
-  if (!data || data.schema_version !== 1) {
+  // v1 and v2 are both rendered; v2 adds the drill-down failed/no-data
+  // breakdown, which renderHealth() guards for so v1 files still work.
+  if (!data || (data.schema_version !== 1 && data.schema_version !== 2)) {
     showToast("run_health.json has unknown schema_version; ignoring");
     return;
   }
@@ -1674,8 +1699,34 @@ function renderHealth() {
       `).join("")}
     </div>`;
 
-  // Coverage gap card: high-score leads with no event detail
-  if (highNoEventsTotal > 0) {
+  // Coverage card. The v2 drill-down breakdown lets us split the misses
+  // into "lookup failed (re-run)" vs "no records on file (usually
+  // legitimate — reporting-only / stormwater permits)". Without it (v1
+  // file or no health) we fall back to the lumped CSV-recomputed gap.
+  const haveBreakdown = drill && drill.lookup_failed != null;
+  if (haveBreakdown) {
+    const attempted = drill.attempted || 0;
+    const withEvents = drill.with_events || 0;
+    const failed = drill.lookup_failed || 0;
+    const noData = drill.no_data || 0;
+    const pct = attempted ? Math.round(100 * withEvents / attempted) : 100;
+    const failStates = Object.keys(drill.lookup_failed_by_state || {});
+    const failBlock = failed > 0 ? `
+        <div class="health-action">
+          <div class="label">⚠ ${failed} lookup${failed === 1 ? "" : "s"} failed (network / EPA throttle) — incomplete, re-run:</div>
+          ${cmdBlock(commandFor(failStates))}
+        </div>` : "";
+    const noDataNote = noData > 0 ? `
+        <div class="subtitle" style="margin-top:8px;">&#8505; ${noData} drilled lead${noData === 1 ? "" : "s"} returned no records on file — usually legitimate (reporting-only or stormwater general-permit noncompliance carries no effluent exceedances to show). Nothing to re-run; if a <em>major</em> facility looks empty it may be a silent throttle — spot-check it on ECHO.</div>` : "";
+    cards.push(`
+      <div class="health-card ${failed > 0 ? "alert" : "ok"}">
+        <h3>Drill-down coverage: ${withEvents} of ${attempted} high-value lead${attempted === 1 ? "" : "s"} have event detail</h3>
+        <div class="subtitle">${pct}% of leads scoring ≥ ${minScore} came back with per-event detail this run.</div>
+        <div class="big-number">${pct}%</div>
+        ${failBlock}
+        ${noDataNote}
+      </div>`);
+  } else if (highNoEventsTotal > 0) {
     const topPct = highNoEventsTotal ? Math.round(100 * topStates / highNoEventsTotal) : 0;
     cards.push(`
       <div class="health-card alert">
@@ -1755,7 +1806,10 @@ function renderHealth() {
   }
 
   // Drilldown stats summary (only if include_events was true)
-  if (h.include_events && drill && Object.keys(drill).length) {
+  // Bulk-only: the fine-comb stats use `candidates`/`*_recovered` keys.
+  // Pipeline's drilldown block uses a different shape (attempted/…), so
+  // gate on a bulk-specific key to avoid rendering this card with zeros.
+  if (h.include_events && drill && drill.candidates != null) {
     const cands = drill.candidates || 0;
     const recovered = (drill.cwa_recovered || 0) + (drill.sdwa_recovered || 0);
     const missing = drill.still_missing_high_value || 0;

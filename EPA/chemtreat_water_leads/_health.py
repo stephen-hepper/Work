@@ -18,7 +18,7 @@ import logging
 from pathlib import Path
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class WarningCollector(logging.Handler):
@@ -57,6 +57,60 @@ def per_state_missing_events(leads: list[dict], min_score: int) -> dict[str, int
         st = L.get("state") or "?"
         out[st] = out.get(st, 0) + 1
     return dict(sorted(out.items(), key=lambda kv: -kv[1]))
+
+
+def summarize_drilldown(high_value: list[dict], events: list[dict],
+                        failed_keys: set, leads: list[dict]) -> dict:
+    """Classify the high-value drill-down outcomes for the Run Health tab.
+
+    Splits the leads that were *attempted* (score >= threshold, with the
+    identifier their program needs) into three buckets:
+
+      with_events   - drilled and found ≥1 event
+      lookup_failed - drill RAISED (timeout / connection drop / bot-block);
+                      incomplete, worth re-running. `failed_keys` carries
+                      these (final-attempt outcome) from the drill helpers.
+      no_data       - drilled but returned no rows. Usually legitimate
+                      (reporting-only or stormwater general-permit
+                      noncompliance has no effluent exceedances to return);
+                      occasionally a silently-throttled HTTP-200-empty that
+                      can't be distinguished from real emptiness here.
+
+    Returns counts, the per-state breakdown of the lookup_failed bucket
+    (so the viewer can build a targeted re-run command), and the explicit
+    failed keys as "registry_id|program" strings (so the viewer can mark
+    those leads' posture as "lookup failed" vs. "no records on file").
+    """
+    attempted = {
+        (L["registry_id"], L["program"]) for L in high_value
+        if (L["program"] == "CWA" and L.get("permit_id"))
+        or (L["program"] == "SDWA" and L.get("registry_id"))
+    }
+    with_events = {
+        (e.get("registry_id"), e.get("program")) for e in events
+    } & attempted
+    no_event = attempted - with_events
+    failed = no_event & set(failed_keys)
+    no_data = no_event - failed
+
+    state_by_key = {
+        (L["registry_id"], L["program"]): (L.get("state") or "?") for L in leads
+    }
+    by_state: dict[str, int] = {}
+    for k in failed:
+        st = state_by_key.get(k, "?")
+        by_state[st] = by_state.get(st, 0) + 1
+
+    return {
+        "attempted": len(attempted),
+        "with_events": len(with_events),
+        "lookup_failed": len(failed),
+        "no_data": len(no_data),
+        "lookup_failed_by_state": dict(
+            sorted(by_state.items(), key=lambda kv: -kv[1])
+        ),
+        "lookup_failed_keys": sorted(f"{k[0]}|{k[1]}" for k in failed),
+    }
 
 
 def count_cwa_events_with_dmr_detail(events: list[dict]) -> tuple[int, int]:
