@@ -97,9 +97,10 @@ persist when they fall out of a run's territory.
 **Why this matters.**
 - Diff baseline is durable across runs. Deleting the DB resets the
   "what's new today" view to "everything looks new again."
-- A user opening `all_leads.csv` between runs sees the prior run's
-  view, not an empty file. The CSV is regenerated atomically at end
-  of run.
+- Each run's CSV snapshot is preserved in its own output folder (see
+  below), so a prior run's view is never lost — even when a later run
+  covers different territory. The DB holds the full cross-run history;
+  each folder holds one run's slice of it.
 - The schema is single-sourced in `FAC_COLUMNS` / `VIOL_COLUMNS`
   ordered dicts — appending to one of those dicts adds the column to
   the DB schema, the CSV header, and the dump in one edit. No
@@ -117,6 +118,42 @@ persist when they fall out of a run's territory.
 - The CSV dump filter (`last_seen >= run_start_ts`) means a
   `--no-events` run still produces a complete CSV — the facilities
   are written, just without event-level columns.
+
+---
+
+## Per-run output folders (runs don't overwrite each other)
+
+**Decision.** Each run writes its CSV snapshot, `run_health.json`, and
+`READ_ME_FIRST.txt` into a fresh subfolder of `--out`, named
+`<command>_<scope>_<YYYYMMDD-HHMMSS>` (e.g.
+`bulk_nationwide_20260527-090000`, `pipeline_WA-AL-VA-LA-GA_20260527-121500`).
+`scope` is the joined state list or `nationwide`. Nothing is written to
+the `out/` root. Helper: `pipeline._run_output_dir`, called by both
+entry points just after `run_start_ts` is captured.
+
+**Why.** The CSVs are per-run snapshots dumped from the DB filtered to
+`last_seen >= run_start_ts`, i.e. only the territory that run touched.
+Writing them to fixed filenames in `out/` root meant a targeted
+`pipeline --states WA,AL,VA,LA,GA` run (used to add per-DMR depth to a
+handful of states) would overwrite the `all_leads.csv` from a prior
+nationwide `bulk` run — collapsing a 50-state inventory down to 5 states
+in the file the viewer loads. Per-run folders let both coexist: the
+nationwide baseline and the deep-dive sit side by side, and the user
+chooses which to upload.
+
+**Why not keep a `latest/` copy in `out/` root too.** Considered and
+declined — it reintroduces an overwrite target (the whole problem) and
+adds a second write path to keep consistent. The end-of-run log line
+prints the exact folder, so "where did my files go" is answered without
+a stable alias. The DB remains the single source of truth across runs;
+the folders are disposable views, now just namespaced by run.
+
+**Scope-name guard.** A state list long enough to make an unwieldy
+folder name (>40 chars, i.e. ~13+ states) collapses to `<N>states`.
+Nationwide bulk (no `--states`) uses `nationwide`. Seconds-resolution
+timestamps make same-scope reruns distinct; two runs within the same
+second would collide, which doesn't happen in practice (runs take
+minutes).
 
 ---
 

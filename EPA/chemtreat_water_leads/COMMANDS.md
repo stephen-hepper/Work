@@ -262,17 +262,23 @@ rm -rf ./cache           # forces re-download on next bulk_loader run
 
 ## What output files mean
 
-After any run, the output directory contains:
+Each run writes into its own subfolder of the output directory, named
+`<command>_<scope>_<YYYYMMDD-HHMMSS>` (e.g.
+`out/bulk_nationwide_20260527-090000/` or
+`out/pipeline_WA-AL-VA-LA-GA_20260527-121500/`). Runs never overwrite
+each other — a targeted `pipeline` run leaves an earlier `bulk` run's
+files untouched. The path is printed at the end of each run. Inside that
+folder:
 
 | File | Purpose | Updates |
 |---|---|---|
-| `READ_ME_FIRST.txt` | Lag warning. Open first. | Every run |
-| `all_leads.csv` | Full ranked inventory of current violators | Every run, overwritten |
-| `violation_events.csv` | Underlying individual DMR / SDWA events | Every run, overwritten |
-| `run_health.json` | Run metadata + warnings + coverage/depth signals for the viewer's Run Health tab | Every run, overwritten |
-| `new_facilities_YYYYMMDD.csv` | Facilities first seen this run | Per-run dated file |
-| `newly_snc_YYYYMMDD.csv` | Facilities that crossed into Significant Non-Complier since last run | Per-run dated file |
-| `new_violations_YYYYMMDD.csv` | Individual new violation events since last run | Per-run dated file |
+| `READ_ME_FIRST.txt` | Lag warning. Open first. | One per run folder |
+| `all_leads.csv` | Full ranked inventory of current violators | One per run folder |
+| `violation_events.csv` | Underlying individual DMR / SDWA events | One per run folder |
+| `run_health.json` | Run metadata + warnings + coverage/depth signals for the viewer's Run Health tab | One per run folder |
+| `new_facilities_YYYYMMDD.csv` | Facilities first seen this run | One per run folder |
+| `newly_snc_YYYYMMDD.csv` | Facilities that crossed into Significant Non-Complier since last run | One per run folder |
+| `new_violations_YYYYMMDD.csv` | Individual new violation events since last run | One per run folder |
 
 The `new_*` files are what sales actually opens each morning. The
 `all_leads.csv` is the standing inventory for territory planning.
@@ -297,7 +303,10 @@ Excel without parsing the score-reasons string:
 
 The HTML viewer in `../chemtreat_water_leads_viewer/index.html` reads
 these columns directly — open it in a browser and use the Upload CSV
-button to load `all_leads.csv` (and optionally `violation_events.csv`).
+button to load `all_leads.csv` (and optionally `violation_events.csv`)
+from the run folder you want to view. The viewer shows one run at a
+time; to compare a nationwide run against a targeted one, upload each
+in turn.
 
 ---
 

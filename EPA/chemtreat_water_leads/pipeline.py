@@ -251,6 +251,30 @@ def _write_lag_notice(out_dir: Path) -> None:
     )
 
 
+def _run_output_dir(base_out: Path, command: str, states: list[str] | None,
+                    run_start_ts: str) -> Path:
+    """Per-run output folder so successive runs don't overwrite each other.
+
+    Layout: ``<base_out>/<command>_<scope>_<YYYYMMDD-HHMMSS>/``. The SQLite
+    DB stays the cross-run source of truth; each folder just holds one
+    run's CSV snapshot, run_health.json, and READ_ME_FIRST.txt. `scope` is
+    the joined state list (or "nationwide" when there's no state filter),
+    so a bulk nationwide run and a targeted pipeline run land side by side
+    instead of clobbering the same filenames in `out/`.
+    """
+    if states:
+        scope = "-".join(states)
+        if len(scope) > 40:           # keep folder names sane for 20+ states
+            scope = f"{len(states)}states"
+    else:
+        scope = "nationwide"
+    # run_start_ts is ISO "2026-05-27T12:15:00"; compact to "20260527-121500".
+    stamp = run_start_ts.replace("-", "").replace(":", "").replace("T", "-")
+    run_dir = base_out / f"{command}_{scope}_{stamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
 def run(states: list[str], out_dir: Path, db_path: Path) -> None:
     print(LAG_BANNER)
 
@@ -398,23 +422,25 @@ def _run_inner(states: list[str], out_dir: Path, db_path: Path,
     # `last_seen >= run_start_ts` filter catches every row this run
     # touched (no microsecond drift between independent utcnow() calls).
     run_start_ts = datetime.utcnow().isoformat(timespec="seconds")
+    # Per-run folder so this run's CSVs don't overwrite a prior run's.
+    run_dir = _run_output_dir(out_dir, "pipeline", states, run_start_ts)
     with snapshot.open_db(db_path) as conn:
         fac_diff = snapshot.diff_and_upsert_facilities(conn, leads, now=run_start_ts)
         viol_diff = snapshot.diff_and_upsert_violations(conn, events, now=run_start_ts)
         snapshot.record_run(conn, notes=f"states={','.join(states)}", now=run_start_ts)
         # ---- 4. Write outputs -----------------------------------------
         today = datetime.utcnow().strftime("%Y%m%d")
-        _write_lag_notice(out_dir)
-        snapshot.dump_facilities_csv(conn, out_dir / "all_leads.csv", run_start_ts)
-        snapshot.dump_violations_csv(conn, out_dir / "violation_events.csv", run_start_ts)
+        _write_lag_notice(run_dir)
+        snapshot.dump_facilities_csv(conn, run_dir / "all_leads.csv", run_start_ts)
+        snapshot.dump_violations_csv(conn, run_dir / "violation_events.csv", run_start_ts)
     # Delta CSVs come from in-memory diff dicts — they describe what
     # CHANGED this run, which only the diff functions know.
-    _write_csv(out_dir / f"new_facilities_{today}.csv", fac_diff["new"])
-    _write_csv(out_dir / f"newly_snc_{today}.csv", fac_diff["newly_snc"])
-    _write_csv(out_dir / f"new_violations_{today}.csv", viol_diff["new"])
+    _write_csv(run_dir / f"new_facilities_{today}.csv", fac_diff["new"])
+    _write_csv(run_dir / f"newly_snc_{today}.csv", fac_diff["newly_snc"])
+    _write_csv(run_dir / f"new_violations_{today}.csv", viol_diff["new"])
 
     health_path = _health.write_run_health(
-        out_dir,
+        run_dir,
         command="pipeline",
         states=states,
         include_events=True,
@@ -433,6 +459,8 @@ def _run_inner(states: list[str], out_dir: Path, db_path: Path,
     log.info("Done. %d new facilities, %d newly SNC, %d new violation events.",
              len(fac_diff["new"]), len(fac_diff["newly_snc"]),
              len(viol_diff["new"]))
+    log.info("Run outputs in %s — upload all_leads.csv, violation_events.csv, "
+             "and run_health.json from there.", run_dir)
     print(LAG_BANNER)   # remind them again at the end
 
 

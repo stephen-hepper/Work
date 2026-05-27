@@ -46,25 +46,39 @@ after stage 1.
 
 ## What's in `out/` after each command
 
+Every run writes into its **own subfolder** so runs never overwrite each
+other. The folder is named `<command>_<scope>_<YYYYMMDD-HHMMSS>`, where
+`scope` is the joined state list (or `nationwide` when there's no state
+filter):
+
 ```
 out/
-├── READ_ME_FIRST.txt          ← lag warning, always
-├── all_leads.csv              ← every lead this run touched, ranked
-├── violation_events.csv       ← every event tied to those leads
-├── run_health.json            ← run metadata + warnings + signals
-├── new_facilities_YYYYMMDD.csv    ← facilities first seen in THIS run
-├── newly_snc_YYYYMMDD.csv         ← facilities that just crossed SNC
-└── new_violations_YYYYMMDD.csv    ← events first seen in THIS run
+├── bulk_nationwide_20260527-090000/      ← a nationwide bulk run
+│   ├── READ_ME_FIRST.txt          ← lag warning, always
+│   ├── all_leads.csv              ← every lead this run touched, ranked
+│   ├── violation_events.csv       ← every event tied to those leads
+│   ├── run_health.json            ← run metadata + warnings + signals
+│   ├── new_facilities_YYYYMMDD.csv    ← facilities first seen in THIS run
+│   ├── newly_snc_YYYYMMDD.csv         ← facilities that just crossed SNC
+│   └── new_violations_YYYYMMDD.csv    ← events first seen in THIS run
+└── pipeline_WA-AL-VA-LA-GA_20260527-121500/   ← a later targeted run
+    ├── all_leads.csv              ← those 5 states, with full DMR depth
+    └── … (same file set)
 ```
 
-The first four files are overwritten every run (current state). The
-`new_*` files are dated — one per run — so a daily/weekly history
-accumulates.
+The folder is self-contained — nothing is written to `out/` root. A
+targeted `pipeline` run therefore can't clobber an earlier nationwide
+`bulk` run; both folders sit side by side. The DB
+(`snapshot.sqlite`) remains the cross-run source of truth; these
+folders are just per-run CSV snapshots dumped from it. The path is
+echoed at the end of each run.
 
-**Upload to the viewer**: `all_leads.csv`, `violation_events.csv`,
-and `run_health.json` together. The first two populate the
-Inventory tab; the JSON populates the Run Health tab with coverage
-gaps, depth gaps, run warnings, and suggested follow-up commands.
+**Upload to the viewer**: from the run folder you want to look at, pick
+`all_leads.csv`, `violation_events.csv`, and `run_health.json` together.
+The first two populate the Inventory tab; the JSON populates the Run
+Health tab with coverage gaps, depth gaps, run warnings, and suggested
+follow-up commands. (The viewer shows one run at a time — to compare a
+nationwide run with a targeted run, upload one, then the other.)
 
 On a first run from an empty DB, the three `new_*` files are
 essentially copies of `all_leads.csv` / `violation_events.csv` (no

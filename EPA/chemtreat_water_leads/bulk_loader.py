@@ -54,7 +54,7 @@ from . import _health, scoring, snapshot
 from .pipeline import (
     TARGET_NAICS, LAG_BANNER, SDWA_LAG_NOTE, CWA_LAG_NOTE,
     EVENT_DRILLDOWN_MIN_SCORE, LOOKBACK_DAYS,
-    _drill_cwa, _drill_sdwa, _write_csv, _write_lag_notice,
+    _drill_cwa, _drill_sdwa, _write_csv, _write_lag_notice, _run_output_dir,
 )
 
 log = logging.getLogger("chemtreat.bulk")
@@ -884,21 +884,23 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
     # 5. Persist to DB + write standing-state CSVs from DB.
     # Same source-of-truth pattern as pipeline.py.
     run_start_ts = datetime.utcnow().isoformat(timespec="seconds")
+    # Per-run folder so this run's CSVs don't overwrite a prior run's.
+    run_dir = _run_output_dir(out_dir, "bulk", states, run_start_ts)
     with snapshot.open_db(db_path) as conn:
         fac_diff = snapshot.diff_and_upsert_facilities(conn, leads, now=run_start_ts)
         viol_diff = snapshot.diff_and_upsert_violations(conn, events, now=run_start_ts)
         notes = f"bulk_loader{' --no-events' if not include_events else ''}"
         snapshot.record_run(conn, notes=notes, now=run_start_ts)
         today = datetime.utcnow().strftime("%Y%m%d")
-        _write_lag_notice(out_dir)
-        snapshot.dump_facilities_csv(conn, out_dir / "all_leads.csv", run_start_ts)
-        snapshot.dump_violations_csv(conn, out_dir / "violation_events.csv", run_start_ts)
-    _write_csv(out_dir / f"new_facilities_{today}.csv", fac_diff["new"])
-    _write_csv(out_dir / f"newly_snc_{today}.csv", fac_diff["newly_snc"])
-    _write_csv(out_dir / f"new_violations_{today}.csv", viol_diff["new"])
+        _write_lag_notice(run_dir)
+        snapshot.dump_facilities_csv(conn, run_dir / "all_leads.csv", run_start_ts)
+        snapshot.dump_violations_csv(conn, run_dir / "violation_events.csv", run_start_ts)
+    _write_csv(run_dir / f"new_facilities_{today}.csv", fac_diff["new"])
+    _write_csv(run_dir / f"newly_snc_{today}.csv", fac_diff["newly_snc"])
+    _write_csv(run_dir / f"new_violations_{today}.csv", viol_diff["new"])
 
     health_path = _health.write_run_health(
-        out_dir,
+        run_dir,
         command="bulk_loader",
         states=states,
         include_events=include_events,
@@ -919,6 +921,8 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
              len(leads), len(events),
              len(fac_diff["new"]), len(fac_diff["newly_snc"]),
              len(viol_diff["new"]))
+    log.info("Run outputs in %s — upload all_leads.csv, violation_events.csv, "
+             "and run_health.json from there.", run_dir)
     print(LAG_BANNER)
 
 

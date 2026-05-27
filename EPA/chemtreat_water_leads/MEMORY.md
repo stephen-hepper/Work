@@ -499,9 +499,12 @@ the fine-comb block ran unconditionally — silent network leak.
 ### `out/run_health.json` — every run
 
 Added 2026-05-26. Both `bulk_loader.run_bulk` and `pipeline.run` write
-a JSON snapshot of the run at end-of-pipeline. Single file, overwritten
-each run (matches the `all_leads.csv` / `violation_events.csv`
-overwrite pattern). The viewer's "Run Health" tab consumes it.
+a JSON snapshot of the run at end-of-pipeline, alongside
+`all_leads.csv` / `violation_events.csv`. As of 2026-05-27 these land
+in a per-run subfolder (`out/<command>_<scope>_<YYYYMMDD-HHMMSS>/`) via
+`pipeline._run_output_dir`, so runs no longer overwrite each other —
+see RATIONALE.md "Per-run output folders". The viewer's "Run Health"
+tab consumes it.
 
 Contents (schema_version = 1):
 

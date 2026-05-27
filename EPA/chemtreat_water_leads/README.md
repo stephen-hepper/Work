@@ -248,7 +248,13 @@ Score increases of >10 points are also tagged on the all-leads output.
 
 ### Step 5–6 — Update DB, write CSVs
 
-Three primary outputs per run:
+Each run writes into its own subfolder of `--out`, named
+`<command>_<scope>_<YYYYMMDD-HHMMSS>` (e.g.
+`out/bulk_nationwide_20260527-090000/`), so runs never overwrite each
+other — a targeted `pipeline` run leaves a prior nationwide `bulk` run's
+files intact. The folder path is logged at the end of the run. See
+`RATIONALE.md` ("Per-run output folders") for why. Three primary outputs
+per run, inside that folder:
 
 - `all_leads.csv` — full ranked inventory. Columns include the score
   and breakdown, the `outreach_posture` string, the seven `tag_*`
@@ -268,7 +274,7 @@ Three primary outputs per run:
   stats, per-state coverage gaps, warnings). The viewer's Run Health
   tab consumes this to surface signals (terminal warnings, coverage
   gaps, suggested follow-up commands) to non-technical readers who
-  never look at the log. Single file, overwritten each run.
+  never look at the log. One per run folder.
 
 A separate viewer at `../chemtreat_water_leads_viewer/index.html` is a
 single-page HTML app for browsing these CSVs. It reads
