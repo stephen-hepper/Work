@@ -506,17 +506,16 @@ in a per-run subfolder (`out/<command>_<scope>_<YYYYMMDD-HHMMSS>/`) via
 see RATIONALE.md "Per-run output folders". The viewer's "Run Health"
 tab consumes it.
 
-Contents (schema_version = 1):
+Contents (schema_version = 2 as of 2026-05-27; viewer accepts 1 and 2):
 
 - `generated_at`, `command`, `states_filter`, `include_events`
 - `totals` — leads (per program), events, new_facilities, newly_snc,
   new_violations
-- `drilldown` — candidates queued, cwa/sdwa events recovered, count
-  still missing after API retries
+- `drilldown` — see the failed-vs-no-data breakdown below.
 - `high_score_no_events_by_state` — per-state count of leads scoring
   ≥ `EVENT_DRILLDOWN_MIN_SCORE` with `outreach_posture=no_events`.
-  Drives the viewer's "Coverage gap → run `pipeline --states X`"
-  suggestion card.
+  Legacy field; the viewer now prefers the `drilldown` breakdown and
+  only falls back to this for v1 files.
 - `depth.cwa_events_with_dmr_detail` / `cwa_events_total` — ratio of
   events with per-DMR numbers vs. just violation codes. Highlights
   where bulk's NPDES events lack depth.
@@ -530,8 +529,55 @@ Contents (schema_version = 1):
 Helpers live in `_health.py` (separate module to avoid the
 `bulk_loader → pipeline` import cycle that would otherwise result if
 both modules imported shared helpers). Schema is versioned; the
-viewer's `setHealth()` refuses to render unknown versions to prevent
-silent staleness when keys change.
+viewer's `setHealth()` accepts v1 and v2 and refuses anything else, so
+older run_health files still render (falling back to the lumped
+coverage card).
+
+### Drill-down failed-vs-no-data breakdown (`drilldown` block, schema v2)
+
+Added 2026-05-27. A `no_events` lead used to conflate two cases: the
+drill-down *failed* (EPA throttle/timeout — worth re-running) vs. the
+facility *genuinely has no event records on file* (reporting-only or
+stormwater general-permit noncompliance — nothing to re-run). The
+`drilldown` block now splits attempted high-value leads into:
+
+- `attempted` / `with_events` / `lookup_failed` / `no_data` (counts)
+- `lookup_failed_by_state` — drives the viewer's targeted re-run command
+- `lookup_failed_keys` — `"registry_id|program"` strings; lets the
+  viewer brand each `no_events` lead's posture text as "lookup failed,
+  verify on ECHO" vs. "no records on file, normal".
+
+Built by `_health.summarize_drilldown(high_value, events, failed_keys,
+leads)`. `failed_keys` comes from a set threaded through
+`_drill_cwa`/`_drill_sdwa` via their `failed_out` param: a key is added
+only when the drill **raises** (timeout/connection drop/bot-block) and
+discarded on a later success/clean-empty, so it reflects each lead's
+**final** attempt outcome.
+
+**Hard limitation — silent throttle counts as `no_data`.** A CWA
+effluent call (and bulk's event-zip joins) that's *silently* throttled
+returns HTTP-200-empty, which is indistinguishable from genuine
+no-data here (the effluent endpoint has no stub signature like DFR's).
+So only *raised* failures are marked `lookup_failed`; silently-empty
+ones land in `no_data`. The viewer copy says so ("if a major facility
+looks empty it may be a silent throttle — spot-check on ECHO").
+
+**Both entry points emit it, with a difference:**
+
+- **pipeline** drills *every* high-value lead via API, so `attempted` ≈
+  all leads scoring ≥ threshold. `drilldown` carries the breakdown only.
+- **bulk_loader** gets most events from the bulk zips and only API
+  fine-combs the `no_events` candidates. Its `drilldown` carries the
+  breakdown **plus** the bulk-specific fine-comb stats (`candidates`,
+  `cwa_recovered`, `sdwa_recovered`, `still_missing_high_value`). The
+  viewer renders both the refined coverage card (keyed on
+  `drilldown.lookup_failed != null`) AND the fine-comb card (keyed on
+  `drilldown.candidates != null`); they're complementary, not
+  redundant. `--no-events` bulk emits no `drilldown` breakdown (it's
+  computed inside the `include_events` block), so the viewer falls back
+  to the old coverage card.
+
+Pinned by `tests/test_drilldown_health.py`.
 
 ---
 
