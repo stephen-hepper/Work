@@ -1450,7 +1450,20 @@ function renderEvents(reg_id) {
     return "<div style='color:var(--muted);font-size:12.5px;'>No individual events available for this facility.</div>";
   }
   const norm = s => String(s || "").trim().toLowerCase();
-  return `<ul class="events-list">` + matches.map(e => {
+  // Surface open violations first: Unaddressed/Unresolved/Open, then
+  // Addressed, then Resolved, then Archived. Blank/unknown status sorts
+  // just under "open" (the pipeline treats blank status as still-active).
+  // The sort is stable, so the incoming recency order is preserved within
+  // each status tier.
+  const STATUS_ORDER = { unaddressed: 0, unresolved: 0, open: 0,
+                         addressed: 2, resolved: 3, archived: 4 };
+  const statusRank = e => {
+    const r = STATUS_ORDER[norm(e.status)];
+    return r == null ? 1 : r;   // blank/unknown -> just below explicit "open"
+  };
+  return `<ul class="events-list">` + matches.slice()
+    .sort((a, b) => statusRank(a) - statusRank(b))
+    .map(e => {
     const param = e.parameter || e.violation_description || e.contaminant || "Violation event";
     let detail = "";
     if (e.parameter) {
