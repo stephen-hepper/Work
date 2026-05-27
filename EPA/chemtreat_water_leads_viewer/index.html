@@ -408,7 +408,77 @@
     font-size: 13px;
     background: #fff;
   }
-  .filter-group select[multiple] { height: 60px; }
+  /* Multi-select dropdown (state filter) */
+  .ms { position: relative; }
+  .ms-toggle {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: #fff;
+    font-family: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    text-align: left;
+  }
+  .ms-caret { color: var(--muted); font-size: 10px; }
+  .ms-panel {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    min-width: 240px;
+    z-index: 30;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.12);
+    padding: 8px;
+  }
+  .ms-panel[hidden] { display: none; }
+  .ms-panel-head { display: flex; gap: 6px; margin-bottom: 6px; }
+  .ms-search {
+    flex: 1;
+    padding: 5px 7px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    font-family: inherit;
+    font-size: 12px;
+  }
+  .ms-clear {
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: #fff;
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .ms-clear:hover { background: var(--accent-soft); border-color: var(--accent); }
+  .ms-options {
+    max-height: 240px;
+    overflow-y: auto;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 2px 10px;
+  }
+  .ms-empty { color: var(--muted); font-size: 12px; padding: 4px; }
+  .ms-option {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 4px;
+    font-size: 13px;
+    border-radius: 4px;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+  .ms-option:hover { background: var(--accent-soft); }
+  .ms-option input { margin: 0; }
   .slider-row {
     display: flex;
     align-items: center;
@@ -784,7 +854,21 @@
   <div class="filters">
     <div class="filter-group">
       <label>State</label>
-      <select id="filterState" multiple></select>
+      <div class="ms" id="filterState">
+        <button type="button" class="ms-toggle" id="filterStateToggle"
+                aria-haspopup="true" aria-expanded="false">
+          <span id="filterStateLabel">All states</span>
+          <span class="ms-caret">&#9662;</span>
+        </button>
+        <div class="ms-panel" id="filterStatePanel" hidden>
+          <div class="ms-panel-head">
+            <input type="text" class="ms-search" id="filterStateSearch"
+                   placeholder="Filter states&hellip;" />
+            <button type="button" class="ms-clear" id="filterStateClear">Clear</button>
+          </div>
+          <div class="ms-options" id="filterStateOptions"></div>
+        </div>
+      </div>
     </div>
     <div class="filter-group">
       <label>Program</label>
@@ -1266,13 +1350,33 @@ function setLeads(newLeads, newEvents, sourceLabel, isDemo) {
 }
 
 function populateStateFilter() {
-  const sel = document.getElementById("filterState");
+  const box = document.getElementById("filterStateOptions");
   const states = Array.from(new Set(leads.map(l => l.state).filter(Boolean))).sort();
-  sel.innerHTML = states.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
+  box.innerHTML = states.length
+    ? states.map(s =>
+        `<label class="ms-option"><input type="checkbox" value="${escapeHtml(s)}" /> ${escapeHtml(s)}</label>`
+      ).join("")
+    : `<div class="ms-empty">No states in data</div>`;
+  document.getElementById("filterStateSearch").value = "";
+  updateStateLabel();
+}
+
+function selectedStates() {
+  return Array.from(
+    document.querySelectorAll("#filterStateOptions input:checked")
+  ).map(c => c.value);
+}
+
+function updateStateLabel() {
+  const sel = selectedStates();
+  const label = document.getElementById("filterStateLabel");
+  label.textContent = sel.length === 0 ? "All states"
+    : sel.length === 1 ? sel[0]
+    : sel.length + " states";
 }
 
 function getFilters() {
-  const states = Array.from(document.getElementById("filterState").selectedOptions).map(o => o.value);
+  const states = selectedStates();
   const program = document.getElementById("filterProgram").value;
   const minScore = Number(document.getElementById("filterScore").value);
   const statusBoxes = Array.from(document.querySelectorAll("#filterStatus input:checked")).map(c => c.value);
@@ -1786,7 +1890,38 @@ document.querySelectorAll("thead th[data-sort]").forEach(th => {
   });
 });
 
-document.getElementById("filterState").addEventListener("change", render);
+// State multi-select: toggle the panel, select states independently via
+// checkboxes, Clear back to zero filters, and a search to find a code fast.
+(function wireStateFilter() {
+  const wrap = document.getElementById("filterState");
+  const toggle = document.getElementById("filterStateToggle");
+  const panel = document.getElementById("filterStatePanel");
+  const setOpen = open => {
+    panel.toggleAttribute("hidden", !open);
+    toggle.setAttribute("aria-expanded", String(open));
+  };
+  toggle.addEventListener("click", () => setOpen(panel.hasAttribute("hidden")));
+  document.getElementById("filterStateOptions").addEventListener("change", () => {
+    updateStateLabel();
+    render();
+  });
+  document.getElementById("filterStateClear").addEventListener("click", () => {
+    document.querySelectorAll("#filterStateOptions input:checked")
+      .forEach(c => { c.checked = false; });
+    updateStateLabel();
+    render();
+  });
+  document.getElementById("filterStateSearch").addEventListener("input", e => {
+    const q = e.target.value.trim().toLowerCase();
+    document.querySelectorAll("#filterStateOptions .ms-option").forEach(opt => {
+      opt.style.display = opt.textContent.trim().toLowerCase().includes(q) ? "" : "none";
+    });
+  });
+  // Close when clicking anywhere outside the control.
+  document.addEventListener("click", e => {
+    if (!wrap.contains(e.target)) setOpen(false);
+  });
+})();
 document.getElementById("filterProgram").addEventListener("change", render);
 document.getElementById("filterScore").addEventListener("input", e => {
   document.getElementById("filterScoreValue").textContent = e.target.value;
