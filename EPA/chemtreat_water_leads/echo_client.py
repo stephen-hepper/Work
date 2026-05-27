@@ -618,7 +618,10 @@ def fetch_sdwa_violation_events(registry_id: str) -> list[dict]:
       Unresolved - violation is still open; sales opportunity
       Addressed  - formal enforcement underway; opportunity but constrained
       Resolved   - water system returned to compliance; do NOT cold-call
-      Archived   - >5 years past noncompliance end date; stale
+      Archived   - closed by EPA / no longer counted against the system.
+                   NOT a synonym for ">5 years old" — EPA archives
+                   recently-resolved violations too, so dates are often
+                   recent. Treat like Resolved (verify before outreach).
 
     Defensive parsing:
       The DFR response shape varies across EPA service versions. We try

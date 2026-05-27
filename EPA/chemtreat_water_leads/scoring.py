@@ -358,7 +358,8 @@ def compute_outreach_posture(events: list[dict] | None) -> str:
       enforcement_underway  - Addressed events but nothing Unaddressed
       verify_first          - events exist, all are Resolved (they fixed
                               it; verify on-the-ground before outreach)
-      historical            - all Archived (>5yr old; stale)
+      historical            - all Archived (closed by EPA / no longer
+                              counted; often recent, NOT just >5yr old)
       no_events             - no drill-down data; rely on facility score
     """
     if not events:

@@ -224,7 +224,7 @@ SDWA events also carry a `Status` field that matters for outreach:
 | `Unaddressed` | Still open | Active opportunity |
 | `Addressed` | Formal enforcement underway | Opportunity but constrained — they may already have a vendor |
 | `Resolved` | System returned to compliance | **Do not cold-call** — they fixed it |
-| `Archived` | >5 yr past noncompliance end | Stale — ignore |
+| `Archived` | Closed by EPA; no longer counted against the system. **Not** a synonym for "old" — EPA archives recently-resolved violations too, so dates here are frequently recent. | Treat like `Resolved` — verify, don't cold-call |
 
 The pipeline aggregates these into the `outreach_posture` column on
 each lead row (see Step 2). EPA's DFR endpoint sometimes returns a

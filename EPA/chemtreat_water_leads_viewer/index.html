@@ -891,7 +891,7 @@
         <label class="chip active"><input type="checkbox" value="Unresolved" checked /> Unresolved</label>
         <label class="chip active"><input type="checkbox" value="Addressed" checked /> Addressed</label>
         <label class="chip"><input type="checkbox" value="Resolved" /> Resolved</label>
-        <label class="chip"><input type="checkbox" value="Archived" /> Archived</label>
+        <label class="chip" title="Closed by EPA / no longer counted against the system — includes recently-resolved violations, not just old ones."><input type="checkbox" value="Archived" /> Archived</label>
         <label class="chip active"><input type="checkbox" value="NoEvents" checked /> No drill-down</label>
       </div>
     </div>
@@ -1257,8 +1257,26 @@ function postureText(status) {
     case "Unresolved": return "Active opportunity — violation is open. Sales should research the account, reference public ECHO data, and approach with a process-improvement angle (not 'we saw you got fined').";
     case "Addressed":  return "Formal enforcement underway. Real budget and remediation timeline likely exist, but the facility may already have a vendor lined up. Confirm before pitching.";
     case "Resolved":   return "DO NOT cold-call about this violation — the facility has already returned to compliance. Use only for territory awareness.";
-    case "Archived":   return "Stale (>5 yr). Treat as historical context; ignore for active outreach.";
+    case "Archived":   return "EPA has closed these violations and no longer counts them against the system. This does NOT mean they're old — EPA archives recently-resolved violations too, so you'll often see recent dates here. Treat like Resolved: don't cold-call about them; verify on ECHO before any outreach.";
     case "NoEvents":   return "No individual violation events were drilled for this facility — the pipeline only drills high-scoring leads via the per-facility DFR endpoint. The score reflects EPA's facility-level compliance flags (SNC, formal actions, quarters in non-compliance). Verify current status on ECHO before outreach.";
+    default: return "";
+  }
+}
+
+/* Short hover-text for a single status pill. Covers both the event-level
+ * vocabulary (Unaddressed/Unresolved/Addressed/Resolved/Archived) and the
+ * lead-level posture vocabulary (which adds NoEvents). "Archived" is the
+ * one people misread: EPA archives a violation once it's closed / no longer
+ * counted against the system, which is frequently recent — it does NOT mean
+ * ">5 years old". */
+function statusTooltip(status) {
+  switch (status) {
+    case "Unresolved":
+    case "Unaddressed": return "Open violation, no remediation underway — active opportunity.";
+    case "Addressed":   return "Formal enforcement underway — opportunity, but the facility may already have a vendor.";
+    case "Resolved":    return "Facility has returned to compliance — do not cold-call; territory awareness only.";
+    case "Archived":    return "Closed by EPA and no longer counted against the system. NOT necessarily old — recently-resolved violations are archived too (you'll see recent dates). Treat like Resolved: verify before any outreach.";
+    case "NoEvents":    return "No individual events were drilled — the score reflects facility-level compliance flags only.";
     default: return "";
   }
 }
@@ -1452,7 +1470,7 @@ function renderEvents(reg_id) {
         <span class="event-date">${escapeHtml(e.period_end || "")}</span>
       </div>
       ${detail ? `<div class="event-detail">${detail}</div>` : ""}
-      ${e.status ? `<div style="margin-top:4px;"><span class="status-badge status-${escapeHtml(e.status)}">${escapeHtml(e.status)}</span></div>` : ""}
+      ${e.status ? `<div style="margin-top:4px;"><span class="status-badge status-${escapeHtml(e.status)}" title="${escapeHtml(statusTooltip(e.status))}">${escapeHtml(e.status)}</span></div>` : ""}
     </li>`;
   }).join("") + `</ul>`;
 }
@@ -1847,7 +1865,7 @@ function render() {
         <td><span class="program-tag program-${escapeHtml(r.program)}">${escapeHtml(r.program)}</span></td>
         <td>${escapeHtml(topReason(r.score_reasons))}</td>
         <td>
-          <span class="status-badge status-${escapeHtml(r.status)}">${escapeHtml(r.status)}</span>
+          <span class="status-badge status-${escapeHtml(r.status)}" title="${escapeHtml(statusTooltip(r.status))}">${escapeHtml(r.status)}</span>
           ${r.status === "Resolved" ? '<span class="donot-pill">Do not call</span>' : ""}
         </td>
         <td class="muted" style="text-align:right;">${r.registry_id === expandedId ? "▲" : "▼"}</td>

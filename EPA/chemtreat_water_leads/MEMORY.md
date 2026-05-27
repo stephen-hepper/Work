@@ -275,7 +275,7 @@ marginal AUC improvement.
 | Unresolved | Active opportunity |
 | Addressed | Formal action underway; constrained but valid |
 | Resolved | **Do not call.** They fixed it. |
-| Archived | Stale (>5 yr); ignore |
+| Archived | Closed by EPA / no longer counted against the system. NOT just ">5 yr old" — verified empirically (2026-05-27 WA/VA/GA/AL run): 56% of drilled SDWA events were `Archived` and many had Q4-2025 dates. EPA archives recently-resolved violations. Treat like Resolved: verify, don't cold-call. |
 
 ---
 
