@@ -6,10 +6,14 @@ mean different things to the user. See _health.summarize_drilldown and the
 failed_out tracking in pipeline._drill_cwa / _drill_sdwa.
 """
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from chemtreat_water_leads import _health, pipeline
+from chemtreat_water_leads import _health, pipeline, bulk_loader
+from tests._fixtures import make_exporter_zip, make_npdes_zip, make_sdwa_zip
 
 
 class TestSummarizeDrilldown(unittest.TestCase):
@@ -103,6 +107,57 @@ class TestDrillFailedTracking(unittest.TestCase):
             pipeline._drill_cwa([lead], "s", "e", events,
                                 inter_call_sleep=0, missed_out=None, failed_out=failed)
         self.assertNotIn(("R1", "CWA"), failed)
+
+
+class TestBulkEmitsBreakdown(unittest.TestCase):
+    """A bulk run with events writes the failed/no-data breakdown into
+    run_health.json (so the viewer's refined coverage card works for bulk
+    too), without losing the bulk-specific fine-comb stats."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_bulk_run_health_has_breakdown(self):
+        # One CWA lead that clears the drill threshold (SNC 40 + 2 formal 15
+        # = 55), so it's a fine-comb candidate.
+        exporter = make_exporter_zip(self.tmp, [{
+            "REGISTRY_ID": "110000000001", "FAC_NAME": "Acme Chemical",
+            "FAC_STATE": "TX", "FAC_NAICS_CODES": "325", "NPDES_IDS": "TX0000001",
+            "CWA_SNC_FLAG": "Y", "CWA_FORMAL_ACTION_COUNT": "2",
+            "CWA_COMPLIANCE_STATUS": "Significant Violator",
+        }])
+        npdes = make_npdes_zip(self.tmp, [])   # no bulk events
+        sdwa = make_sdwa_zip(self.tmp, [])
+
+        zips = {"echo_exporter": exporter, "npdes": npdes, "sdwa": sdwa}
+        out_dir = self.tmp / "out"
+
+        with patch.object(bulk_loader, "_download_cached",
+                          side_effect=lambda url, c, name: zips[name]), \
+             patch.object(bulk_loader, "_drill_cwa", side_effect=lambda *a, **k: 0), \
+             patch.object(bulk_loader, "_drill_sdwa", side_effect=lambda *a, **k: 0):
+            bulk_loader.run_bulk(out_dir=out_dir, db_path=self.tmp / "snap.sqlite",
+                                 cache_dir=self.tmp / "cache", states=["TX"],
+                                 include_events=True)
+
+        run_dirs = [p for p in out_dir.iterdir() if p.is_dir()]
+        self.assertEqual(len(run_dirs), 1)
+        health = json.loads((run_dirs[0] / "run_health.json").read_text())
+        self.assertEqual(health["schema_version"], 2)
+        drill = health["drilldown"]
+        # New breakdown keys present...
+        for k in ("attempted", "with_events", "lookup_failed", "no_data",
+                  "lookup_failed_by_state", "lookup_failed_keys"):
+            self.assertIn(k, drill)
+        # ...alongside the bulk-specific fine-comb stat.
+        self.assertIn("candidates", drill)
+        # The lead had no events (drills no-op'd) and didn't raise -> no_data.
+        self.assertEqual(drill["attempted"], 1)
+        self.assertEqual(drill["with_events"], 0)
+        self.assertEqual(drill["lookup_failed"], 0)
+        self.assertEqual(drill["no_data"], 1)
 
 
 if __name__ == "__main__":

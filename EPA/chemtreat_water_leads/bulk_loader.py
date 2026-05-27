@@ -852,6 +852,9 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
         # this run are excluded by `_drilldown_candidates`.
         candidates = _drilldown_candidates(leads, prior_scores)
         drilldown_stats["candidates"] = len(candidates)
+        # Leads whose fine-comb drill RAISED (vs. returned cleanly empty),
+        # final-attempt outcome. Feeds the Run Health failed-vs-no-data split.
+        failed_keys: set = set()
         if candidates:
             log.info("API fine-comb fallback: %d candidates "
                      "(score>=%d / newly-discovered / score-jumped); "
@@ -861,9 +864,11 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
             start = (datetime.utcnow()
                      - timedelta(days=LOOKBACK_DAYS)).strftime("%m/%d/%Y")
             cwa_recovered = _drill_cwa(candidates, start, end, events,
-                                       inter_call_sleep=1.0, missed_out=None)
+                                       inter_call_sleep=1.0, missed_out=None,
+                                       failed_out=failed_keys)
             sdwa_recovered = _drill_sdwa(candidates, events,
-                                         inter_call_sleep=2.0, missed_out=None)
+                                         inter_call_sleep=2.0, missed_out=None,
+                                         failed_out=failed_keys)
             drilldown_stats["cwa_recovered"] = cwa_recovered
             drilldown_stats["sdwa_recovered"] = sdwa_recovered
             log.info("Fine-comb recovered events for %d CWA + %d SDWA leads",
@@ -880,6 +885,18 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
                 log.warning("After fine-comb: %d high-value leads STILL "
                             "no_events — API retries exhausted. These need "
                             "manual follow-up.", still_missing)
+
+        # Same failed-vs-no-data breakdown the pipeline emits, over the
+        # final high-value set. "no_data" here means a lead that had no
+        # bulk events AND whose fine-comb came back empty (or had no API
+        # identifier) — usually legitimate; "lookup_failed" means the
+        # fine-comb drill raised and is worth re-running. Merged alongside
+        # the bulk-specific fine-comb stats above (different keys, both
+        # consumed by the viewer).
+        high_value = [L for L in leads
+                      if L["lead_score"] >= EVENT_DRILLDOWN_MIN_SCORE]
+        drilldown_stats.update(
+            _health.summarize_drilldown(high_value, events, failed_keys, leads))
 
     # 5. Persist to DB + write standing-state CSVs from DB.
     # Same source-of-truth pattern as pipeline.py.
