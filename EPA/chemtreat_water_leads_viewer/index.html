@@ -231,6 +231,28 @@
   .health-card.warn  .big-number { color: var(--orange); }
   .health-card.info  .big-number { color: var(--accent); }
   .health-card.ok    .big-number { color: var(--green); }
+  /* Stacked coverage bar — visualizes with_events / no_data / lookup_failed
+     proportions on the drill-down coverage card. Pure CSS, no charting lib. */
+  .cov-bar {
+    display: flex;
+    height: 14px;
+    border-radius: 7px;
+    overflow: hidden;
+    margin: 10px 0 8px;
+    background: var(--gray-soft);
+  }
+  .cov-seg { height: 100%; min-width: 2px; }
+  .cov-with   { background: var(--green); }
+  .cov-nodata { background: var(--orange); }
+  .cov-failed { background: var(--danger); }
+  .cov-legend {
+    display: flex; gap: 14px; flex-wrap: wrap;
+    font-size: 12px; color: var(--muted); margin-top: 2px;
+  }
+  .cov-swatch {
+    display: inline-block; width: 10px; height: 10px;
+    border-radius: 2px; margin-right: 5px; vertical-align: -1px;
+  }
   .health-card ul {
     margin: 8px 0 0 0;
     padding: 0;
@@ -1601,6 +1623,33 @@ function cmdBlock(cmd) {
   return `<pre class="health-cmd">${escapeHtml(cmd)}<button class="copy-cmd" data-cmd="${escAttr(cmd)}">copy</button></pre>`;
 }
 
+/* Stacked horizontal bar for the drill-down coverage card. Segments are
+ * sized by share of `attempted`; zero-count segments are omitted from both
+ * the bar and the legend so a clean run looks clean. */
+function coverageBar(withEvents, noData, failed, attempted) {
+  if (!attempted) return "";
+  const pctW = 100 * withEvents / attempted;
+  const pctN = 100 * noData / attempted;
+  const pctF = 100 * failed / attempted;
+  const seg = (cls, pct, title, n) => n > 0
+    ? `<div class="cov-seg cov-${cls}" style="width: ${pct}%" title="${escAttr(title)}"></div>`
+    : "";
+  const item = (cls, label, n) => n > 0
+    ? `<span><i class="cov-swatch cov-${cls}"></i>${n.toLocaleString()} ${escapeHtml(label)}</span>`
+    : "";
+  return `
+    <div class="cov-bar" aria-label="Drill-down coverage breakdown">
+      ${seg("with",   pctW, withEvents + " with events", withEvents)}
+      ${seg("nodata", pctN, noData + " no records on file", noData)}
+      ${seg("failed", pctF, failed + " lookups failed", failed)}
+    </div>
+    <div class="cov-legend">
+      ${item("with", "with events", withEvents)}
+      ${item("nodata", "no records on file", noData)}
+      ${item("failed", "lookups failed", failed)}
+    </div>`;
+}
+
 function renderHealth() {
   const root = document.getElementById("healthBody");
   if (!health) {
@@ -1721,8 +1770,9 @@ function renderHealth() {
     cards.push(`
       <div class="health-card ${failed > 0 ? "alert" : "ok"}">
         <h3>Drill-down coverage: ${withEvents} of ${attempted} high-value lead${attempted === 1 ? "" : "s"} have event detail</h3>
-        <div class="subtitle">${pct}% of leads scoring ≥ ${minScore} came back with per-event detail this run.</div>
+        <div class="subtitle">${pct}% of leads with a <strong>facility-only</strong> score ≥ ${minScore} came back with per-event detail. Event-aware re-scoring may shift some of these below ${minScore} in the final inventory, so this count won't match the Inventory tile exactly.</div>
         <div class="big-number">${pct}%</div>
+        ${coverageBar(withEvents, noData, failed, attempted)}
         ${failBlock}
         ${noDataNote}
       </div>`);
