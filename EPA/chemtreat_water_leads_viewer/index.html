@@ -194,6 +194,92 @@
   .tab-pane { display: none; }
   .tab-pane.active { display: block; }
 
+  /* Rendered-markdown prose for the doc tabs. Targeted at the syntax our
+     bundled docs actually use (headings, tables, code, lists, HRs). */
+  .md-content {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 8px 6px 40px;
+    font-size: 14.5px;
+    line-height: 1.55;
+    color: var(--text);
+  }
+  .md-content h1, .md-content h2, .md-content h3,
+  .md-content h4, .md-content h5, .md-content h6 {
+    margin: 1.6em 0 0.5em;
+    line-height: 1.3;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .md-content h1 { font-size: 26px; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-top: 0.3em; }
+  .md-content h2 { font-size: 20px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+  .md-content h3 { font-size: 16.5px; }
+  .md-content h4 { font-size: 14.5px; color: var(--muted); }
+  .md-content p { margin: 0.7em 0; }
+  .md-content ul, .md-content ol { margin: 0.6em 0; padding-left: 26px; }
+  .md-content li { margin: 0.25em 0; }
+  .md-content li > ul, .md-content li > ol { margin: 0.25em 0; }
+  .md-content hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 2em 0;
+  }
+  .md-content a { color: var(--accent); text-decoration: none; }
+  .md-content a:hover { text-decoration: underline; }
+  .md-content code {
+    background: var(--gray-soft);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.92em;
+  }
+  .md-content pre {
+    background: #1e2530;
+    color: #e6e9ef;
+    padding: 12px 14px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 12.5px;
+    line-height: 1.5;
+    margin: 1em 0;
+  }
+  .md-content pre code {
+    background: transparent;
+    color: inherit;
+    padding: 0;
+    border-radius: 0;
+    font-size: inherit;
+  }
+  .md-content table {
+    border-collapse: collapse;
+    margin: 1em 0;
+    font-size: 13.5px;
+    width: auto;
+    max-width: 100%;
+    display: block;
+    overflow-x: auto;
+  }
+  .md-content th, .md-content td {
+    border: 1px solid var(--border);
+    padding: 6px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  .md-content th {
+    background: var(--gray-soft);
+    font-weight: 600;
+  }
+  .md-content tr:nth-child(even) td { background: #fafbfc; }
+  .md-content blockquote {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    margin: 1em 0;
+    padding: 6px 14px;
+    color: var(--text);
+  }
+  .md-content strong { font-weight: 600; }
+  .md-empty { color: var(--muted); padding: 30px; text-align: center; }
+
   /* Run-health panels */
   .health-grid {
     display: grid;
@@ -850,6 +936,9 @@
       Run Health
       <span class="tab-badge hidden" id="healthBadge">0</span>
     </button>
+    <button class="tab-btn doc-tab" data-tab="readme" role="tab">Readme</button>
+    <button class="tab-btn doc-tab" data-tab="scoring" role="tab">Scoring Guide</button>
+    <button class="tab-btn doc-tab" data-tab="commands" role="tab">Commands</button>
   </div>
 
   <div class="tab-pane active" id="tabInventory" role="tabpanel">
@@ -954,6 +1043,16 @@
       </div>
     </div>
   </div><!-- /tabHealth -->
+
+  <div class="tab-pane" id="tabReadme" role="tabpanel">
+    <div class="md-content" id="docReadme"></div>
+  </div>
+  <div class="tab-pane" id="tabScoring" role="tabpanel">
+    <div class="md-content" id="docScoring"></div>
+  </div>
+  <div class="tab-pane" id="tabCommands" role="tabpanel">
+    <div class="md-content" id="docCommands"></div>
+  </div>
 
 </div>
 
@@ -1255,6 +1354,223 @@ function escapeHtml(s) {
   return String(s == null ? "" : s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
+
+/* ---------- Minimal markdown renderer for the doc tabs ----------
+ *
+ * Targeted at the syntax our bundled docs (README, SCORING_GUIDE,
+ * COMMANDS) actually use: headings, paragraphs, GFM tables, fenced
+ * code blocks, ordered/unordered lists with simple nesting, HRs,
+ * blockquotes, inline code/bold/italic/links. Not a general-purpose
+ * markdown engine — if you start needing footnotes, autolinks, HTML
+ * embeds, or definition lists, swap in marked.min.js instead.
+ *
+ * Pipeline: split into lines, walk block-by-block, recurse for nested
+ * lists, then run renderInline() on each block's text. Code-span
+ * placeholders shield backtick contents from further inline regexes
+ * (so a `*` inside code isn't read as italic). */
+
+function renderMarkdown(src) {
+  const lines = String(src || "").replace(/\r\n?/g, "\n").split("\n");
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Blank line — block separator.
+    if (line.trim() === "") { i++; continue; }
+
+    // Fenced code block.
+    let m = line.match(/^```(\w*)\s*$/);
+    if (m) {
+      const lang = m[1];
+      const buf = [];
+      i++;
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) {
+        buf.push(lines[i]); i++;
+      }
+      i++;  // skip closing fence
+      out.push(`<pre><code${lang ? ` class="lang-${escAttr(lang)}"` : ""}>${escapeHtml(buf.join("\n"))}</code></pre>`);
+      continue;
+    }
+
+    // ATX heading.
+    m = line.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
+    if (m) {
+      const level = m[1].length;
+      out.push(`<h${level}>${renderInline(m[2])}</h${level}>`);
+      i++; continue;
+    }
+
+    // HR.
+    if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(line.trim())) {
+      out.push("<hr>");
+      i++; continue;
+    }
+
+    // Blockquote.
+    if (line.startsWith(">")) {
+      const buf = [];
+      while (i < lines.length && lines[i].startsWith(">")) {
+        buf.push(lines[i].replace(/^>\s?/, ""));
+        i++;
+      }
+      out.push(`<blockquote>${renderInline(buf.join(" "))}</blockquote>`);
+      continue;
+    }
+
+    // GFM table — header row, separator row, body rows.
+    if (line.trim().startsWith("|") && i + 1 < lines.length &&
+        /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/.test(lines[i + 1])) {
+      const headers = parseTableRow(line);
+      const aligns = parseTableRow(lines[i + 1]).map(c => {
+        const cs = c.trim();
+        const L = cs.startsWith(":"), R = cs.endsWith(":");
+        return L && R ? "center" : R ? "right" : L ? "left" : null;
+      });
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].trim().startsWith("|")) {
+        rows.push(parseTableRow(lines[i])); i++;
+      }
+      out.push(renderTable(headers, aligns, rows));
+      continue;
+    }
+
+    // Unordered or ordered list.
+    if (/^(\s*)([-*+]|\d+\.)\s+/.test(line)) {
+      const tag = /^\s*\d+\./.test(line) ? "ol" : "ul";
+      const block = [];
+      while (i < lines.length) {
+        const ln = lines[i];
+        if (ln.trim() === "") {
+          // Allow a blank line if the next line continues the list/nesting.
+          const nxt = lines[i + 1] || "";
+          if (/^(\s*)([-*+]|\d+\.)\s+/.test(nxt) || /^\s{2,}\S/.test(nxt)) {
+            block.push(ln); i++; continue;
+          }
+          break;
+        }
+        if (/^(\s*)([-*+]|\d+\.)\s+/.test(ln) ||
+            (block.length && /^\s+\S/.test(ln))) {
+          block.push(ln); i++;
+        } else { break; }
+      }
+      out.push(renderList(block, tag));
+      continue;
+    }
+
+    // Paragraph — gather consecutive non-block lines.
+    const buf = [];
+    while (i < lines.length && lines[i].trim() !== "" &&
+           !/^#{1,6}\s/.test(lines[i]) &&
+           !/^```/.test(lines[i]) &&
+           !lines[i].trim().startsWith("|") &&
+           !/^(-{3,}|\*{3,}|_{3,})\s*$/.test(lines[i].trim()) &&
+           !/^(\s*)([-*+]|\d+\.)\s+/.test(lines[i]) &&
+           !lines[i].startsWith(">")) {
+      buf.push(lines[i]); i++;
+    }
+    if (buf.length) out.push(`<p>${renderInline(buf.join(" "))}</p>`);
+  }
+  return out.join("\n");
+}
+
+function parseTableRow(line) {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|")) s = s.slice(0, -1);
+  const cells = [];
+  let cur = "";
+  for (let j = 0; j < s.length; j++) {
+    if (s[j] === "\\" && s[j + 1] === "|") { cur += "|"; j++; }
+    else if (s[j] === "|") { cells.push(cur.trim()); cur = ""; }
+    else cur += s[j];
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+
+function renderTable(headers, aligns, rows) {
+  const styleFor = idx => aligns[idx] ? ` style="text-align:${aligns[idx]}"` : "";
+  let html = "<table><thead><tr>";
+  headers.forEach((h, idx) => { html += `<th${styleFor(idx)}>${renderInline(h)}</th>`; });
+  html += "</tr></thead><tbody>";
+  rows.forEach(r => {
+    html += "<tr>";
+    headers.forEach((_, idx) => {
+      html += `<td${styleFor(idx)}>${renderInline(r[idx] || "")}</td>`;
+    });
+    html += "</tr>";
+  });
+  return html + "</tbody></table>";
+}
+
+function renderList(srcLines, tag) {
+  // Group into items based on the first line's indent.
+  const baseIndent = (srcLines[0].match(/^(\s*)/) || ["", ""])[1].length;
+  const items = [];
+  let cur = null;
+  for (const ln of srcLines) {
+    const m = ln.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
+    if (m && m[1].length === baseIndent) {
+      if (cur) items.push(cur);
+      cur = [m[3]];
+    } else if (cur) {
+      // continuation line; strip up to (baseIndent + 2) leading spaces
+      cur.push(ln.replace(new RegExp(`^\\s{0,${baseIndent + 2}}`), ""));
+    }
+  }
+  if (cur) items.push(cur);
+
+  let html = `<${tag}>`;
+  for (const it of items) {
+    // Split each item's lines into pre-nested-list text vs. nested-list block.
+    const flat = [];
+    const nested = [];
+    let inNested = false;
+    for (const ln of it) {
+      if (!inNested && /^(\s+)([-*+]|\d+\.)\s+/.test(ln)) inNested = true;
+      (inNested ? nested : flat).push(ln);
+    }
+    let body = renderInline(flat.join(" ").trim());
+    if (nested.length) {
+      const nestedTag = /^\s+\d+\./.test(nested[0]) ? "ol" : "ul";
+      body += renderList(nested.map(s => s.replace(/^\s{2}/, "")), nestedTag);
+    }
+    html += `<li>${body}</li>`;
+  }
+  return html + `</${tag}>`;
+}
+
+function renderInline(text) {
+  let s = escapeHtml(text);
+  // Pull code spans out first so their contents aren't mangled by other regexes.
+  const codes = [];
+  s = s.replace(/`([^`\n]+)`/g, (_, c) => {
+    codes.push(c);
+    return `${codes.length - 1}`;
+  });
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[\s(])\*([^*\s][^*\n]*?)\*(?=[\s.,;:)!?]|$)/g, "$1<em>$2</em>");
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,
+    (_, txt, url) => `<a href="${escAttr(url)}" target="_blank" rel="noopener">${txt}</a>`);
+  s = s.replace(/(\d+)/g, (_, idx) => `<code>${codes[+idx]}</code>`);
+  return s;
+}
+
+function renderDoc(name) {
+  const paneId = "doc" + name[0].toUpperCase() + name.slice(1);
+  const pane = document.getElementById(paneId);
+  if (!pane || pane.dataset.rendered === "1") return;
+  const src = document.getElementById("doc-" + name);
+  if (!src || !src.textContent.trim()) {
+    pane.innerHTML = '<div class="md-empty">Doc content not embedded. Run <code>python -m chemtreat_water_leads_viewer.bake_docs</code> from the repo root.</div>';
+    return;
+  }
+  pane.innerHTML = renderMarkdown(src.textContent);
+  pane.dataset.rendered = "1";
+}
+
 function topReason(score_reasons) {
   if (!score_reasons) return "";
   const parts = String(score_reasons).split("|").map(s => s.trim()).filter(Boolean);
@@ -1410,6 +1726,9 @@ function setLeads(newLeads, newEvents, sourceLabel, isDemo) {
   updateHealthBadge();
   // If user is currently on Health tab, refresh it too.
   if (activeTab === "health") renderHealth();
+  if (activeTab === "readme" || activeTab === "scoring" || activeTab === "commands") {
+    renderDoc(activeTab);
+  }
 }
 
 function populateStateFilter() {
@@ -1944,6 +2263,9 @@ function switchTab(name) {
     p.classList.toggle("active", p.id === "tab" + name[0].toUpperCase() + name.slice(1));
   });
   if (name === "health") renderHealth();
+  if (name === "readme" || name === "scoring" || name === "commands") {
+    renderDoc(name);
+  }
 }
 
 function render() {
@@ -2139,6 +2461,978 @@ document.getElementById("resetBtn").addEventListener("click", () => {
 /* ---------- Init ---------- */
 setLeads(SEED_LEADS, SEED_EVENTS, "Demo data", true);
 </script>
+
+<!-- BAKED_DOCS_START -->
+<script type="text/markdown" id="doc-readme">
+# ChemTreat Water-Violation Lead Generator
+
+A small Python package that pulls EPA water-violation data, scores
+facilities for ChemTreat sales relevance, and tells you what's new since
+the last run. Designed to be auditable: every score comes with reasons,
+every diff is reproducible from the SQLite snapshot.
+
+---
+
+## What this is (and isn't)
+
+**It is:** a daily-cadence lead-discovery tool that surfaces industrial
+facilities and public water systems that just got into trouble with EPA
+over a water-related issue.
+
+**It isn't:** a substitute for sales judgment. EPA data has known
+reporting lags and quirks (see *Caveats* below). The score is a
+prioritization aid, not a verdict.
+
+---
+
+## Data sources
+
+All data comes from **EPA's ECHO REST API** at `echodata.epa.gov`. ECHO
+is the public-facing front end to several internal EPA systems:
+
+| Endpoint we call | Backed by | What we get |
+|---|---|---|
+| `cwa_rest_services.get_facilities` | ICIS-NPDES | Industrial wastewater dischargers, with current-quarter compliance flags |
+| `sdw_rest_services.get_systems` | SDWIS-Fed | Public water systems with violations |
+| `eff_rest_services.get_effluent_chart` | ICIS-NPDES DMRs | *Individual* effluent violation events: pollutant, limit, measured value, exceedance % |
+| `dfr_rest_services.get_dfr` | ICIS / SDWIS / FRS composite | Facility detail used for SDWA event drill-down |
+
+No API key required. Rate limit is informal — we sleep 0.3–0.5s
+between calls. EPA does throttle the DFR endpoint under rapid-fire
+load (manifesting as 200 responses with a stub `Results` dict);
+`fetch_sdwa_violation_events` detects throttled stubs by response-key
+density and retries once with a 2-second backoff. A small share of
+state-wide CWA queries (LA, OH) occasionally return empty without a
+`QueryID` under pressure too; that fallback is on the TODO list.
+
+---
+
+## Pipeline (`pipeline.run`)
+
+```
+┌─────────────────────┐    ┌───────────────────┐    ┌──────────────────────┐
+│ 1. Find violators   │ -> │ 2. Score & rank   │ -> │ 3. Drill into events │
+│    (per state +     │    │   (explainable     │    │   (high-score        │
+│     NAICS prefix)   │    │    rule sum)      │    │    facilities only)  │
+└─────────────────────┘    └───────────────────┘    └──────────────────────┘
+                                                              │
+                                                              v
+┌─────────────────────┐    ┌───────────────────┐    ┌──────────────────────┐
+│ 6. Write CSV output │ <- │ 5. Update DB      │ <- │ 4. Diff vs snapshot  │
+└─────────────────────┘    └───────────────────┘    └──────────────────────┘
+```
+
+### Step 1 — Find violators
+
+We loop over (state, NAICS-prefix) pairs and ask ECHO for active CWA
+facilities matching `p_st=<state>`, `p_act=Y`, and the NAICS prefix
+(`p_ncs=<naics>` — confusingly named, this is the **NAICS** filter, not
+a non-compliance filter). For SDWA, we ask for *active systems with
+violations* using `p_viola=Y`.
+
+EPA returns the result set in two patterns depending on size: a
+self-contained array for small queries, or a `QueryID` + paginated
+`get_qid` workflow for state-sized queries. `echo_client._qid_workflow`
+handles both transparently, requesting the compliance columns we need
+via the `qcolumns` parameter (column-ID translation comes from each
+service's `.metadata` endpoint, fetched once per process and cached).
+
+After the response comes back, a client-side compliance gate
+(`_has_cwa_compliance_signal`) keeps only the rows showing some open
+non-compliance signal — SNC text, quarters in non-compliance, formal
+action count, or a `V`/`S` in the 13-quarter compliance history string.
+EPA's server-side compliance filters are individually narrow (one
+violation type each, no OR-combinator); the client-side gate captures
+the broader "in any kind of trouble" set sales actually wants.
+
+Filtering by NAICS server-side keeps the result focused on ChemTreat's
+target industries. Edit `TARGET_NAICS` in `pipeline.py` to adjust.
+
+See `MEMORY.md` for the field-name traps in this layer — `p_ncs`,
+`qcolumns` column-IDs, the `CWPViolStatus` Yes/No flag, the
+`WaterSystems` SDWA pagination key, and the `ViolationsEnforcementActions.Sources`
+DFR violation array all caused stacked silent failures during the
+project. They're fixed; the doc captures the trail.
+
+### Step 2 — Score
+
+`scoring.score_facility(raw, events=None)` returns `(total, reasons)`.
+The total is the sum of contributions from individual rules; the
+reasons list is a human-readable breakdown like:
+
+```
+Score 142:
+  +40: Significant Non-Complier (SNC)
+  +32: 6 quarter(s) in non-compliance
+  +15: 1 formal enforcement action(s) in last 5 yr
+  +25: 5 open violation event(s)
+  +20: 1 active Treatment Technique violation(s)
+  +10: 1 active Lead/Copper Rule violation(s)
+```
+
+The breakdown lands in the `score_reasons` CSV column so a rep can
+look at any row and see *why* it ranks where it does. Negative
+contributions are allowed and rendered with the sign — the
+`rule_only_resolved_demote` rule subtracts 30 when every drilled event
+is Resolved/Archived (the "do not call" case), so resolved-only
+facilities sort below genuinely-open leads instead of mixing in at the
+top.
+
+Scoring runs in two phases:
+
+1. **Facility-only pass**, during `_flatten_facility`, reads only the
+   summary columns ECHO returned (SNC text, quarter counts, formal
+   action counts, …). This score decides which facilities get drilled
+   for individual violation events.
+2. **Event-aware re-score**, after drill-down, re-runs `score_facility`
+   with the events list and replaces the initial score and reasons.
+   The event rules contribute Treatment Technique / MCL / Lead-Copper
+   boosts and the do-not-call demote.
+
+There's no `MAX_SCORE` cap — flattening the top of the distribution
+hid real differentiation (an earlier version had 99 leads tied at 87).
+Sales would rather see "this one is a 142" than have a third of the
+inventory collapsed onto the same number.
+
+#### Facility rules (`scoring.RULES`)
+
+| Rule | Max points | Rationale |
+|---|---|---|
+| `rule_significant_violator` | 40 | EPA's "SNC" designation is the strongest single signal — it doesn't trigger on isolated incidents. Matches descriptive text in CWPSNCStatus / SNC, plus the `SNCFlag` / `SeriousViolator` booleans for SDWA. |
+| `rule_chronic_violation` | 32 | Quarters-in-non-compliance × 8 (capped). Captures duration. Reads CWPQtrsWithNC / QtrsWithVio. |
+| `rule_formal_action` | 15 | Formal enforcement = legal obligation to remediate. Real budget exists. Reads CWPFormalEaCnt / Feas. |
+| `rule_major_facility` | 10 | "Major" NPDES permits = high flow / high pollutant load = larger ChemTreat opportunity. CWA-only signal. |
+| `rule_recent_penalty` | 5–8 | Tiered by penalty size. CWA-only (SDW has no per-system penalty amount). |
+| `rule_recent_inspection` | 5 | EPA actively watching = facility under time pressure. |
+
+#### Event rules (`scoring.EVENT_RULES`)
+
+These run only after the drill-down and only when individual events
+are available. They turn the score into something status-aware instead
+of just a sum of summary flags.
+
+| Rule | Points | Rationale |
+|---|---|---|
+| `rule_active_open_events` | 5/event, cap 25 | Each Unaddressed/Unresolved/Open event is a current opportunity. |
+| `rule_treatment_technique_active` | 20 | Per MEMORY.md, Treatment Technique violations are the single highest-relevance category for ChemTreat — what their chemistry products fix. Only counts events with status not in {Resolved, Archived}. |
+| `rule_health_based_mcl_active` | 15 | Active MCL violations are health-based, high urgency, ChemTreat-treatable. |
+| `rule_lead_copper_active` | 10 (or 5) | Lead-and-Copper Rule = specific corrosion-control opportunity. Falls back to the facility-level PbViol/CuViol/LeadAndCopperViol flags at 5 points when no events match. |
+| `rule_only_resolved_demote` | **−30** | If every drilled event is Resolved/Archived, demote so the row sorts below genuinely-open leads. |
+
+To tune: edit the rule functions or add new ones to `RULES` /
+`EVENT_RULES`. There's intentionally no ML here — interpretability
+matters more than a few points of AUC on a marketing dataset.
+
+#### Tag columns and outreach posture
+
+In addition to the score, every row gets two view-builders worth of
+output for sales-side filtering:
+
+- **Tags** (`scoring.compute_tags`): seven booleans — `tag_active_snc`,
+  `tag_treatment_technique`, `tag_mcl_violation`, `tag_lead_copper`,
+  `tag_major_facility`, `tag_only_resolved_events`, and the composite
+  `tag_chemtreat_high_relevance`. Sales filters in Excel on these to
+  pare 7,000 rows into the 50 they want without parsing reason strings.
+- **`outreach_posture`** (`scoring.compute_outreach_posture`): one word
+  per facility — `active`, `enforcement_underway`, `verify_first`,
+  `historical`, or `no_events`. A one-glance "should I call?"
+  indicator computed from event statuses.
+
+Both columns are populated in the phase-2 augmentation step after
+drill-down, alongside the event-aware re-score.
+
+### Step 3 — Drill into individual events
+
+For facilities scoring ≥ 50 (`EVENT_DRILLDOWN_MIN_SCORE`), we pull
+specific violation events. Each program uses a different endpoint and
+returns different data shapes.
+
+**CWA — Discharge Monitoring Report exceedances** (`get_effluent_chart`)
+
+Per NPDES permit, last 365 days. Each event includes:
+
+- `parameter` — the pollutant (e.g. "BOD, 5-day", "Total Suspended Solids")
+- `limit_value` / `dmr_value` — permitted vs measured
+- `exceedance_pct` — how badly over the limit
+- `period_end` — when the violation was recorded
+- `violation_id` — stable unique ID (used for dedupe & diffing)
+
+CWA events are numeric and time-stamped. "We see you had three BOD
+exceedances on outfall 001 between June and August" is a *very*
+different sales opener than "we saw you got fined."
+
+**SDWA — Drinking water violations** (`get_dfr`)
+
+Per public water system. The actual violation list lives under
+`Results.ViolationsEnforcementActions.Sources[*].Violations` in the DFR
+response — and that path was not in any of EPA's documented examples;
+the project's stacked silent-failure history (see MEMORY.md) includes
+several earlier guesses at where the array lived. Each event already
+carries text fields (`FederalRule`, `ContaminantName`,
+`ViolationCategoryDesc`, `Status`) so no code-lookup is needed in this
+path. The `sdwa_codes.py` module is still used by the bulk loader,
+which deals with the coded CSV download instead.
+
+Categories you'll see (from `ViolationCategoryDesc`):
+
+| Category | What it means | ChemTreat relevance |
+|---|---|---|
+| Maximum Contaminant Level Violation | MCL exceeded | High — actual water-quality issue |
+| Treatment Technique Violation | Required treatment process failed | Highest — this is what treatment chemistry fixes |
+| Monitoring and Reporting / Monitoring Violation | Failed to sample/test on schedule | Medium — often a process problem leading indicator |
+| Reporting Violation | Failed to file results with state | Low — paperwork |
+| Other Violation | Catch-all (public-notice rule, etc.) | Low — paperwork |
+
+SDWA events also carry a `Status` field that matters for outreach:
+
+| Status | Meaning | Outreach posture |
+|---|---|---|
+| `Unaddressed` | Still open | Active opportunity |
+| `Addressed` | Formal enforcement underway | Opportunity but constrained — they may already have a vendor |
+| `Resolved` | System returned to compliance | **Do not cold-call** — they fixed it |
+| `Archived` | Closed by EPA; no longer counted against the system. **Not** a synonym for "old" — EPA archives recently-resolved violations too, so dates here are frequently recent. | Treat like `Resolved` — verify, don't cold-call |
+
+The pipeline aggregates these into the `outreach_posture` column on
+each lead row (see Step 2). EPA's DFR endpoint sometimes returns a
+stub response under rate-pressure (a `Results` dict with only a few
+keys); `fetch_sdwa_violation_events` detects this by key density and
+retries once with a 2-second backoff.
+
+### Step 4 — Diff against snapshot
+
+`snapshot.py` stores everything in a SQLite file. On each run we
+compare current state to the DB and emit four change sets:
+
+| Diff | Meaning |
+|---|---|
+| `new_facilities_*.csv` | Facility appeared in violator results for the first time |
+| `newly_snc_*.csv` | Existing facility just crossed into Significant Non-Complier |
+| `new_violations_*.csv` | New individual DMR violation event |
+| (in-DB) newly_resolved | Violation moved from Unresolved → Resolved (sales should pause outreach) |
+
+Score increases of >10 points are also tagged on the all-leads output.
+
+### Step 5–6 — Update DB, write CSVs
+
+Each run writes into its own subfolder of `--out`, named
+`<command>_<scope>_<YYYYMMDD-HHMMSS>` (e.g.
+`out/bulk_nationwide_20260527-090000/`), so runs never overwrite each
+other — a targeted `pipeline` run leaves a prior nationwide `bulk` run's
+files intact. The folder path is logged at the end of the run. See
+`RATIONALE.md` ("Per-run output folders") for why. Three primary outputs
+per run, inside that folder:
+
+- `all_leads.csv` — full ranked inventory. Columns include the score
+  and breakdown, the `outreach_posture` string, the seven `tag_*`
+  booleans, normalized facility identity / location / NAICS, the SNC
+  text and dates, quarter counts, formal action counts, total
+  penalties, the 13-quarter compliance history, and an `echo_url`
+  pointing back at EPA's facility page.
+- `violation_events.csv` — the underlying DMR exceedances (CWA) and
+  per-violation rows from the SDWA DFR. Includes status, period dates,
+  the resolved date, federal/state MCL where applicable, and a
+  `data_lag_note` so a row read in isolation still carries the caveat.
+- `new_*.csv` — the daily changeset (`new_facilities`, `newly_snc`,
+  `new_violations`). This is what the sales team should actually look
+  at each morning — the standing inventory has dozens of inches of
+  scroll, the changeset is the few rows that matter today.
+- `run_health.json` — structured snapshot of the run (totals, drill-down
+  stats, per-state coverage gaps, warnings). The viewer's Run Health
+  tab consumes this to surface signals (terminal warnings, coverage
+  gaps, suggested follow-up commands) to non-technical readers who
+  never look at the log. One per run folder.
+
+A separate viewer at `../chemtreat_water_leads_viewer/index.html` is a
+single-page HTML app for browsing these CSVs. It reads
+`outreach_posture` directly and renders the status pills, "do not
+call" affordance, and filter chips off it. See
+`chemtreat_water_leads_viewer/RATIONALE.md` for design notes.
+
+---
+
+## ⚠️ Reporting lag — read this carefully
+
+**EPA water data is not real-time.** This is the single most important
+thing for sales to understand before using these outputs.
+
+| Program | Typical lag | Cause |
+|---|---|---|
+| **SDWA** (drinking water) | **~90 days** | EPA: violation and enforcement data are reported quarterly to the federal system *no later than the quarter following the quarter in which events occur*. States and EPA use this extra quarter to verify data accuracy. |
+| **CWA** (wastewater) | **~30–45 days** | Facilities file Discharge Monitoring Reports monthly. Very recent activity (last 30 days) is incomplete. |
+
+What this means in practice:
+
+- A "newly seen" SDWA violation in today's diff may actually have happened
+  4 months ago. The facility may have already returned to compliance.
+- A rep cold-calling about an SDWA violation should verify current status
+  *before* the call — the `status` field on each event row (Resolved /
+  Addressed / Unresolved / Archived) is the most important column.
+- CWA data is timelier but still backward-looking. Treat the pipeline as
+  a *prioritization* tool, not a breaking-news feed.
+
+To make this hard to miss, the lag is surfaced in **four places**:
+
+1. **Console banner** printed at the start and end of every run.
+2. **`data_lag_note` column** on every event row in the violation CSV.
+3. **`READ_ME_FIRST.txt`** written to the output directory each run.
+4. **This README section.**
+
+## Other caveats — things to tell your team
+
+1. **"Primacy" creates inconsistencies.** Most states implement SDWA
+   themselves and report to EPA. State-by-state data completeness
+   varies; EPA itself acknowledges underreporting in some states.
+
+2. **The SNC flag is a quarterly recomputation.** A facility can be
+   tagged SNC, fix things, and drop the flag within a quarter. The
+   `newly_snc` diff is the cleanest "fresh signal" we have.
+
+3. **The score is heuristic.** It is intentionally simple and
+   inspectable. Don't treat it as more precise than it is — a 78 vs an
+   82 is noise; a 78 vs a 40 is signal.
+
+4. **Outreach posture matters.** This data is fully public, but a cold
+   "we saw you got fined" email reads as ambulance-chasing. The intended
+   use is *territory prioritization* and *account research* — the rep
+   walks into existing meetings already knowing the facility has a
+   chronic cooling-tower exceedance, not blasting violation notices at
+   strangers.
+
+---
+
+## Running it
+
+Quick example:
+
+```bash
+pip install requests
+python -m chemtreat_water_leads.pipeline \
+    --states TX,LA,OH,PA,WV --out ./out --db ./snapshot.sqlite
+```
+
+For nationwide / large-territory runs use the bulk loader instead:
+
+```bash
+python -m chemtreat_water_leads.bulk_loader \
+    --out ./out --db ./snapshot.sqlite --cache ./cache
+```
+
+The bulk path emits one row per (facility, program) — a facility that
+trips both CWA and SDWA signals appears as two rows with the same
+`registry_id` but different `program` values. Event joins fall back
+to NPDES_ID (CWA) or PWSID (SDWA) when REGISTRY_ID is blank on bulk
+violation rows (which is the common case). `--no-events` makes the
+run fully offline — zero EPA API calls, zero event-zip downloads.
+
+See `RATIONALE.md` for the design choices behind per-program shapes,
+the three-trigger drill-down candidate set, and the SQLite-as-source-
+of-truth contract.
+
+See **`COMMANDS.md`** for the full command reference with realistic
+time estimates, first-run vs later-run differences, daily-cron patterns,
+and ad-hoc SQLite queries for inspecting the snapshot.
+
+First run will write everything as "new" (no prior snapshot exists).
+Subsequent runs produce useful diffs.
+
+---
+
+## File map
+
+```
+chemtreat_water_leads/
+├── __init__.py
+├── echo_client.py    # ECHO REST API client — one place to change endpoints
+├── scoring.py        # Rules, tags, outreach_posture — edit here to tune
+├── sdwa_codes.py     # SDWA reference code lookups (bulk-loader path)
+├── snapshot.py       # SQLite diff/state — extend schema as new fields land
+├── pipeline.py       # API-based orchestration (regional / state pulls)
+├── bulk_loader.py    # CSV-based orchestration (nationwide pulls)
+├── _health.py        # Run-health JSON writer + WarningCollector log handler
+├── README.md         # Methodology — you are here
+├── STARTING_GUIDE.md # First-time guide for sales-facing users
+├── COMMANDS.md       # Practical run patterns & time estimates
+├── SCORING_GUIDE.md  # Two-pass scoring + which command produces which pass
+├── DIAGRAM.md        # State map of bulk vs API depths
+├── MEMORY.md         # Field-name traps & the silent-failure trail
+├── RATIONALE.md      # Design decisions behind the bulk path
+└── TODO.md           # Scoring/output follow-ups (D–G from the assessment)
+
+../chemtreat_water_leads_viewer/
+├── index.html        # Single-page CSV viewer (also bundles README /
+│                     # SCORING_GUIDE / COMMANDS as in-page doc tabs)
+├── bake_docs.py      # Re-embed the bundled docs after editing them:
+│                     # `python -m chemtreat_water_leads_viewer.bake_docs`
+└── RATIONALE.md      # Viewer design notes & gap list
+```
+
+Tests live at `EPA/tests/`. Run with:
+
+```bash
+cd EPA && ../.venv/bin/python -m unittest discover -s tests -t .
+```
+
+**Read MEMORY.md before editing `echo_client.py`.** It documents ten
+silent-failure layers EPA's API led us through (NAICS-filter naming,
+qcolumns mechanics, response-shape variation, the `CWPViolStatus`
+Yes/No flag, the SDW `WaterSystems` pagination key, the DFR
+`ViolationsEnforcementActions.Sources` path, etc.). Every one of them
+looked like a working filter for a while.
+
+---
+
+## Extending it
+
+`TODO.md` tracks the concrete scoring/output follow-ups from the
+methodology assessment:
+
+- **D. Externalize rule weights** — replace inline `return 40, ...`
+  literals with a `WEIGHTS` dict (or YAML). Sales feedback like
+  "weight SNC less, TT more" becomes a config change instead of a code
+  review.
+- **E. Expose dropped facility metadata** — `PopulationServedCount`,
+  `PWSTypeDesc`, `OwnerDesc`, `PrimarySourceDesc` come back in the SDWA
+  response but aren't on the CSV. Population served is a direct revenue
+  proxy. Add the columns and a `rule_population_served` rule.
+- **F. Per-rule strength bands** — `(points, reason, strength ∈ {HIGH,
+  MEDIUM, LOW})` and a `signal_strength_breakdown` column.
+- **G. Persist score components** — one column per rule
+  (`score_snc`, `score_chronic`, …) so sales can pivot on individual
+  contributions instead of parsing the reason string.
+
+Plus three open issues outside the scoring layer:
+
+- **Retry-on-empty for state-wide queries** — LA/OH CWA queries
+  sometimes return empty without a QID under rapid-fire pacing. The
+  DFR-retry pattern in `fetch_sdwa_violation_events` could be lifted
+  to `_qid_workflow`.
+- **`EVENT_DRILLDOWN_MIN_SCORE` tuning** — currently 50, with no CWA
+  leads reaching it (top CWA score in the latest TX run was 47). Either
+  drop the threshold for CWA or split per-program thresholds.
+- **Email digest of `new_*.csv`** — pandas + SMTP, ~30 lines.
+
+For a longer running list (scaffolding, ideas not scored above), open
+`TODO.md`. For the EPA-API gotcha history, see `MEMORY.md`.
+</script>
+<script type="text/markdown" id="doc-scoring">
+# Scoring guide
+
+How a lead's `lead_score` is built, why the same facility can have two
+different scores during one run, and which command produces which pass.
+
+Companion doc to `README.md` (which lists the rules) and `COMMANDS.md`
+(which lists the runs). This file connects them.
+
+---
+
+## TL;DR
+
+Every facility is scored **twice**:
+
+| Pass | Reads | Picks | Output |
+|---|---|---|---|
+| **1. Facility-only** | EPA's summary flags (SNC text, quarter counts, formal-action counts, …) | Who is worth the slow per-facility drill-down call | A first `lead_score` |
+| **2. Event-aware** | The same flags **plus** the individual drilled violation events | The final ranking sales sees | A second `lead_score` that overwrites pass 1 |
+
+Both passes call the same function — `scoring.score_facility(facility,
+events=None)` — just with or without `events`. The two-pass design exists
+because the drill-down is expensive (one API call per facility); cheap
+flag-based scoring decides who's worth that call.
+
+---
+
+## Pass 1 — Facility-only
+
+Computed for **every** lead, from the summary columns EPA returns in the
+facility listing (`get_qid` for the API path, ECHO Exporter columns for
+bulk). No per-violation detail; just counts and flags.
+
+`scoring.RULES` (6 rules, ~`scoring.py:227`):
+
+| Rule | Points | Fires on |
+|---|---|---|
+| `rule_significant_violator` | 40 | SNC text on `CWPSNCStatus` / `SNC`, or `SNCFlag`=`Y` |
+| `rule_chronic_violation` | 8 × quarters, cap 32 | `CWPQtrsWithNC` / `QtrsWithVio` |
+| `rule_formal_action` | 15 | `CWPFormalEaCnt` / `Feas` ≥ 1 |
+| `rule_major_facility` | 10 | `CWPPermitTypes` contains "Major" (CWA only) |
+| `rule_recent_penalty` | 5 or 8 | `CWPTotalPenalties` ≥ $10K or $100K |
+| `rule_recent_inspection` | 5 | `CWPDaysLastInspection` between 0 and 180 |
+
+The pass-1 score decides who clears `EVENT_DRILLDOWN_MIN_SCORE` (`50`,
+defined in `pipeline.py`) and gets drilled. Anyone below the threshold
+keeps this score as their final score — they were never drilled.
+
+### How to produce pass 1
+
+Both top-level commands compute pass 1 on every lead they touch. The
+difference is **where the summary flags come from**:
+
+```bash
+# Cheapest nationwide pass 1 — zero EPA API calls.
+# Streams the weekly ECHO Exporter zip, scores every facility, writes
+# all_leads.csv. No events drilled.
+python -m chemtreat_water_leads.bulk_loader \
+    --out ./out --db ./snapshot.sqlite --cache ./cache \
+    --no-events
+
+# Pass 1 on a specific territory via the API. Slower per state because
+# every (state, NAICS prefix) combo is its own ECHO query, but produces
+# the same pass-1 score shape.
+python -m chemtreat_water_leads.pipeline \
+    --states WA,VA --out ./out --db ./snapshot.sqlite
+```
+
+Internally both call `scoring.score_facility(raw)` with `events=None` —
+only `RULES` run; `EVENT_RULES` are skipped.
+
+---
+
+## Pass 2 — Event-aware
+
+Runs **only on facilities that cleared the drill-down threshold and got
+their violation events fetched**. Adds five rules from `scoring.EVENT_RULES`
+(`scoring.py:236`) that read the drilled events themselves, not just the
+summary counts:
+
+| Event rule | Points | Fires on |
+|---|---|---|
+| `rule_active_open_events` | +5 each, cap 25 | events with status Unaddressed / Unresolved / Open |
+| `rule_treatment_technique_active` | +20 | event `violation_category` contains "TREATMENT TECHNIQUE" and status is not closed |
+| `rule_health_based_mcl_active` | +15 | event `violation_category` contains "MAXIMUM CONTAMINANT" and status is not closed |
+| `rule_lead_copper_active` | +10 (or +5 fallback) | event `rule_family` contains "LEAD AND COPPER" (event-level) or `PbViol`/`CuViol`/`LeadAndCopperViol` flags (facility-level fallback) |
+| **`rule_only_resolved_demote`** | **−30** | the facility has events **and every one** is Resolved/Archived |
+
+That last rule is the one that makes pass 1 and pass 2 diverge most
+sharply. A facility can look bad in pass 1 (`+32 chronic +15 formal +5
+inspect = 52`, drilled) but turn out to have every violation closed,
+landing at `52 + (−30) = 22` in pass 2 — well below the drill threshold
+and well below where sales looks.
+
+The score sales sees in `all_leads.csv` is the pass-2 score. Pass 1
+exists only inside the run; it's not persisted as a separate column.
+The `score_reasons` column itemizes every rule that fired, with the sign,
+so any score is auditable.
+
+### How to produce pass 2
+
+Two sources of events feed pass 2. Both commands invoke pass 2; what
+differs is **where the events come from**:
+
+```bash
+# Full bulk run. Pass 1 from the ECHO Exporter, then bulk event zips
+# (NPDES_SE/PS/CS, SDWA_VIOLATIONS_ENFORCEMENT) load events for matched
+# leads. Pass 2 re-scores. Finally, the API fine-comb fallback drills
+# leads that scored >=50 but still had no events from the bulk feed
+# (or that are newly-discovered / score-jumped), and pass 2 re-runs on
+# those. ~15-30 min, 3 downloads (~830 MB).
+python -m chemtreat_water_leads.bulk_loader \
+    --out ./out --db ./snapshot.sqlite --cache ./cache
+
+# Targeted API run. Pass 1 from the per-state ECHO API queries, then
+# pipeline._drill_cwa + pipeline._drill_sdwa drill EVERY high-value lead
+# in those states via:
+#   eff_rest_services.get_effluent_chart  -> CWA per-DMR events
+#   dfr_rest_services.get_dfr             -> SDWA per-violation events
+# Pass 2 re-scores. Use this to deepen states where the bulk path left
+# leads as outreach_posture=no_events (visible in Run Health).
+python -m chemtreat_water_leads.pipeline \
+    --states WA,AL,VA,LA,GA --out ./out --db ./snapshot.sqlite
+```
+
+Internally, both commands re-call `scoring.score_facility(raw, events)`
+on each drilled lead. Pass 2 also recomputes the `outreach_posture`
+string and the seven `tag_*` boolean columns; see
+`scoring.compute_outreach_posture` and `scoring.compute_tags`.
+
+---
+
+## When the two scores diverge in your output
+
+The Run Health "Drill-down coverage" card and the Inventory tile at the
+same threshold can show different counts. They're answering different
+questions:
+
+- **Run Health "X of Y high-value leads have event detail"**: `Y` is the
+  pass-1 ≥ 50 count — the leads that were **selected for drilling**.
+- **Inventory tile at `Min score 50`**: the pass-2 ≥ 50 count — leads
+  that are **still worth a rep's attention after the event-aware
+  re-scoring**.
+
+The gap = leads that scored ≥ 50 on facility flags, were drilled, and
+then got demoted below 50 by `rule_only_resolved_demote`. In a recent
+pipeline run on WA/AL/VA/LA/GA: 297 drilled, 11 demoted, 286 final ≥ 50
+— and after applying the default Inventory STATUS chips (which hide
+`Resolved` + `Archived` postures by default) the visible row count
+dropped further to 238. None of this is a bug; each number measures a
+different slice. The card subtitle now says "facility-only" to make this
+explicit.
+
+---
+
+## Which command to run when
+
+Both commands do both passes. The picking criterion is **where do the
+events come from** and **how deep do you need per-event detail**:
+
+| Goal | Run |
+|---|---|
+| Nationwide facility-only inventory, no event detail | `bulk_loader --no-events` |
+| Nationwide standard run (bulk events + API fine-comb for top no-event leads) | `bulk_loader` |
+| Deep per-DMR detail for CWA leads on chosen states | `pipeline --states X,Y` |
+| Fill a Run Health "lookup failed" gap from a prior run | `pipeline --states <the failed states>` |
+
+Typical cadence: a weekly `bulk_loader` keeps the standing inventory
+fresh; targeted `pipeline --states X` runs deepen specific territories
+when the Run Health tab flags coverage gaps.
+
+For practical run timing, EPA's throttling behavior, and cron patterns,
+see `COMMANDS.md`. For the bulk vs. API design trade-offs (per-program
+shapes, drill-down triggers, source-of-truth contract), see
+`RATIONALE.md`. For the silent-failure history that shaped the API
+client and discovery logic, see `MEMORY.md`.
+</script>
+<script type="text/markdown" id="doc-commands">
+# Basic Commands
+
+Copy-paste reference for running the lead generator. Each section
+includes a rough time estimate and notes on what's different between
+the first run (cold) and subsequent runs (warm).
+
+## TL;DR — which command should I use?
+
+| Your situation | Use this | First run | Later runs |
+|---|---|---|---|
+| Just one or two states | `pipeline` (API) | 1–3 min | 30s–2 min |
+| Regional sales territory (3–10 states) | `pipeline` (API) | 5–20 min | 2–8 min |
+| Most of the lower 48 (20+ states) | `bulk_loader` | 10–20 min | 3–10 min |
+| Nationwide | `bulk_loader` | 10–20 min | 3–10 min |
+| Just one city / one permit-holder | `pipeline` with one-state filter, then grep | <1 min | <1 min |
+
+**Rule of thumb:** if your territory is more than ~15 states, the bulk
+loader is faster. Below that, the API is fine and gets you slightly
+fresher data (weekly vs every-7-days cache).
+
+---
+
+## First-time setup
+
+The project lives under the uv-managed workspace at `Work/`:
+
+```bash
+cd ~/PycharmProjects/Work          # workspace with pyproject.toml + uv.lock
+uv sync                            # installs requests (only runtime dep)
+cd EPA                             # all run commands below assume CWD=EPA
+```
+
+If you don't use uv, plain `pip install requests` works too — that's
+still the only external dependency.
+
+No API keys, no database setup, no config files. SQLite state lives in
+a single file you pass on the command line.
+
+---
+
+## Single-state pull (API)
+
+The fastest way to get a sense of the tool's output. Good for testing
+or for a rep who only covers one state.
+
+```bash
+python -m chemtreat_water_leads.pipeline --states TX --out ./out
+```
+
+**What happens:** queries CWA across 13 NAICS prefixes (Texas has lots
+of refining and chemical mfg, so this is the heavy state), then SDWA
+once, then drills into individual violation events for any facility
+scoring ≥ 50.
+
+**First run:** **~1–3 min.** All facilities are flagged "new" since the
+snapshot DB doesn't exist yet. The `new_facilities_*.csv` will equal
+`all_leads.csv`.
+
+**Later runs:** **~30 sec – 2 min.** Same network work, but only the
+*deltas* end up in the `new_*.csv` files — usually 0–20 rows. This is
+what you actually want sales looking at each day.
+
+---
+
+## Regional pull (API) — typical sales territory
+
+```bash
+python -m chemtreat_water_leads.pipeline \
+    --states TX,LA,OK,AR,MS,AL \
+    --out ./out \
+    --db ./snapshot.sqlite
+```
+
+Six Gulf-region states is a reasonable example. Adjust to your actual
+territory.
+
+**First run:** **~5–15 min.** Most of this is `time.sleep(0.4)` between
+API calls being polite to EPA. With 6 states × 13 NAICS = 78 CWA
+queries + 6 SDWA queries + drill-down for high-value leads, you're
+looking at ~250–400 HTTP calls total.
+
+**Later runs:** **~2–8 min.** Same network volume, but the diff against
+the snapshot DB filters output to actual new signals.
+
+---
+
+## Larger multi-region pull (API)
+
+```bash
+python -m chemtreat_water_leads.pipeline \
+    --states TX,LA,OK,AR,MS,AL,GA,FL,SC,NC,VA,WV,OH,PA,KY,TN \
+    --out ./out \
+    --db ./snapshot.sqlite \
+    -v
+```
+
+Sixteen states — most of the Southeast + Appalachia. Verbose mode (`-v`)
+helps when you want to see API progress.
+
+**First run:** **~20–45 min.** This is roughly the upper end of what
+the API is practical for. If your run is regularly slower than this,
+switch to `bulk_loader`.
+
+**Later runs:** **~10–20 min.** Networking dominates regardless.
+
+---
+
+## Nationwide pull (bulk — recommended)
+
+```bash
+python -m chemtreat_water_leads.bulk_loader \
+    --out ./out \
+    --db ./snapshot.sqlite \
+    --cache ./cache
+```
+
+This downloads three EPA bulk files (cached for 7 days, matching EPA's
+weekly refresh cadence), stream-filters them, and produces the same
+output shape as the API pipeline.
+
+**First run:** **~10–20 min total.**
+
+- Download `echo_exporter.zip` (~250 MB): 1–5 min depending on connection
+- Stream-filter 1.5M facility rows: 1–3 min
+- Download `npdes_downloads.zip` (~80 MB): 30s–2 min
+- Read NPDES violation events: 1–3 min
+- Download `SDWA_latest_downloads.zip` (~40 MB): 15s–1 min
+- Read SDWA violation events: <1 min
+
+**Later runs (within 7 days):** **~3–10 min.** Zips are cached and
+re-used. Only the parse/filter/diff work runs.
+
+**Later runs (after 7 days):** back to first-run timing because the
+cache invalidates.
+
+---
+
+## Nationwide bulk, no events — fastest possible scan
+
+If sales only needs the facility list (not per-pollutant detail), skip
+the event drill-downs:
+
+```bash
+python -m chemtreat_water_leads.bulk_loader \
+    --out ./out --db ./snapshot.sqlite --cache ./cache \
+    --no-events
+```
+
+**First run:** **~5–10 min** (just `echo_exporter.zip`).
+**Later runs:** **~1–3 min.**
+
+`--no-events` makes the run fully offline — **zero EPA API calls** and
+zero event-zip downloads (no `npdes_downloads.zip`, no
+`SDWA_latest_downloads.zip`, no API fine-comb fallback to
+`echo.epa.gov`). Use this in air-gapped or rate-limit-sensitive
+environments. The facility inventory still lands in
+`all_leads.csv` and the snapshot DB; only the per-event detail is
+absent.
+
+---
+
+## Nationwide bulk, filtered to specific states
+
+The bulk loader also accepts `--states`. Useful when you already know
+the nationwide cache is fresh and just want a regional cut without
+re-running the API loop:
+
+```bash
+python -m chemtreat_water_leads.bulk_loader \
+    --states CA,WA,OR,AZ,NV \
+    --cache ./cache --db ./snapshot.sqlite --out ./out
+```
+
+**First run:** ~10–15 min (download + filter).
+**Later runs:** **~2–4 min** with warm cache.
+
+---
+
+## Daily cron (nightly diffs to a sales mailbox)
+
+```cron
+# At 6 AM every morning, refresh the snapshot and copy new_*.csv
+# somewhere humans look. We don't pipe to email here — that's a
+# separate step you'd wire up to your SMTP server or Slack webhook.
+0 6 * * *  cd /opt/chemtreat && \
+           python -m chemtreat_water_leads.pipeline \
+             --states TX,LA,OK,AR \
+             --out /opt/chemtreat/daily/$(date +\%Y\%m\%d) \
+             --db  /opt/chemtreat/state/snapshot.sqlite \
+             >> /opt/chemtreat/logs/run.log 2>&1
+```
+
+**Each run:** 2–8 min (regional API pull, warm DB).
+
+The cron writes one timestamped directory per run, so the
+`new_facilities_YYYYMMDD.csv` files form a daily history you can keep
+or rotate. The `snapshot.sqlite` is the source of truth across runs —
+**don't delete it** unless you want every facility to look "new" again.
+
+---
+
+## Running tests
+
+The project ships with a stdlib `unittest` suite covering the bulk
+loader's discovery, scoring, event-join, and `--no-events` paths.
+
+```bash
+cd EPA
+../.venv/bin/python -m unittest discover -s tests -t .
+```
+
+23 tests, runs in well under a second. No network access required —
+all fixtures are in-memory zips. Run before any change to
+`bulk_loader.py` so regressions show up immediately.
+
+---
+
+## Inspecting the snapshot DB directly
+
+The SQLite file is the audit trail. Useful for ad-hoc questions sales
+might ask:
+
+```bash
+sqlite3 ./snapshot.sqlite
+
+# How many facilities are we tracking by state?
+sqlite> SELECT state, COUNT(*) FROM facilities GROUP BY state ORDER BY 2 DESC;
+
+# Top 20 unresolved leads right now
+sqlite> SELECT company, city, state, lead_score
+        FROM facilities
+        WHERE lead_score >= 60
+        ORDER BY lead_score DESC LIMIT 20;
+
+# When was each facility first detected?
+sqlite> SELECT company, first_seen FROM facilities
+        WHERE state = 'TX' ORDER BY first_seen DESC LIMIT 10;
+
+# Has the lead score for a specific company moved?
+sqlite> SELECT company, lead_score, first_seen, last_seen
+        FROM facilities WHERE company LIKE '%REFINING%';
+```
+
+---
+
+## Resetting / starting over
+
+If you want to wipe history and start fresh (e.g. you changed scoring
+rules and want everything re-evaluated):
+
+```bash
+rm ./snapshot.sqlite     # next run rebuilds from scratch
+```
+
+If you want to keep history but force a re-download of the bulk zips:
+
+```bash
+rm -rf ./cache           # forces re-download on next bulk_loader run
+```
+
+---
+
+## What output files mean
+
+Each run writes into its own subfolder of the output directory, named
+`<command>_<scope>_<YYYYMMDD-HHMMSS>` (e.g.
+`out/bulk_nationwide_20260527-090000/` or
+`out/pipeline_WA-AL-VA-LA-GA_20260527-121500/`). Runs never overwrite
+each other — a targeted `pipeline` run leaves an earlier `bulk` run's
+files untouched. The path is printed at the end of each run. Inside that
+folder:
+
+| File | Purpose | Updates |
+|---|---|---|
+| `READ_ME_FIRST.txt` | Lag warning. Open first. | One per run folder |
+| `all_leads.csv` | Full ranked inventory of current violators | One per run folder |
+| `violation_events.csv` | Underlying individual DMR / SDWA events | One per run folder |
+| `run_health.json` | Run metadata + warnings + coverage/depth signals for the viewer's Run Health tab | One per run folder |
+| `new_facilities_YYYYMMDD.csv` | Facilities first seen this run | One per run folder |
+| `newly_snc_YYYYMMDD.csv` | Facilities that crossed into Significant Non-Complier since last run | One per run folder |
+| `new_violations_YYYYMMDD.csv` | Individual new violation events since last run | One per run folder |
+
+The `new_*` files are what sales actually opens each morning. The
+`all_leads.csv` is the standing inventory for territory planning.
+
+### Columns sales filters on
+
+`all_leads.csv` carries several columns specifically for slicing in
+Excel without parsing the score-reasons string:
+
+| Column | Type | Use |
+|---|---|---|
+| `lead_score` | int | Total of facility + event rule contributions (uncapped). Sort descending. |
+| `score_reasons` | string | Pipe-separated breakdown like `+40: SNC \| +32: 6 quarter(s) ... \| -30: All drilled events Resolved/Archived`. Negative entries demote do-not-call facilities. |
+| `outreach_posture` | enum | One word per facility — `active`, `enforcement_underway`, `verify_first`, `historical`, `no_events`. The one-glance "should I call?" indicator. |
+| `tag_active_snc` | bool | Facility currently flagged Significant Non-Complier. |
+| `tag_treatment_technique` | bool | Active Treatment Technique violation in events (highest ChemTreat-relevance category). |
+| `tag_mcl_violation` | bool | Active MCL violation (health-based). |
+| `tag_lead_copper` | bool | Active Lead/Copper Rule violation or facility-level Pb/Cu flag. |
+| `tag_major_facility` | bool | NPDES "Major" permit (high flow / high load — CWA only). |
+| `tag_only_resolved_events` | bool | Has drilled events, all Resolved/Archived. Sales should verify or skip. |
+| `tag_chemtreat_high_relevance` | bool | Composite: any of `active_snc / treatment_technique / mcl_violation / lead_copper` AND not `only_resolved_events`. The "if a rep had one filter, this is it" column. |
+
+The HTML viewer in `../chemtreat_water_leads_viewer/index.html` reads
+these columns directly — open it in a browser and use the Upload CSV
+button to load `all_leads.csv` (and optionally `violation_events.csv`)
+from the run folder you want to view. The viewer shows one run at a
+time; to compare a nationwide run against a targeted one, upload each
+in turn.
+
+---
+
+## Sanity-check times if yours are way off
+
+If a regional run is taking **much** longer than the estimates above:
+
+- **API rate-limiting:** EPA doesn't publish a hard limit, but very
+  large runs sometimes slow down. The 0.4s sleep in `pipeline.py` is
+  meant to keep us under the threshold; increase it if you see HTTP
+  errors in the log.
+- **DFR throttle stubs:** the per-facility DFR endpoint is the
+  pickiest. EPA sometimes returns a 200 with a stub `Results` dict
+  (only a few keys) instead of the usual ~50; the client detects this
+  by key density and retries once with a 2-second backoff
+  (see `DFR_RETRY_BACKOFF_SEC` in `echo_client.py`). If you see many
+  retries in `-v` output, raise `EVENT_DRILLDOWN_MIN_SCORE` to cut the
+  drill-down count or extend the inter-drill sleep.
+- **Drill-down volume:** if you have hundreds of high-scoring leads,
+  the per-permit `get_effluent_chart` and per-system DFR calls
+  dominate. Tune `EVENT_DRILLDOWN_MIN_SCORE` in `pipeline.py` upward
+  to limit the count.
+- **Network egress:** the bulk loader downloads ~370 MB total on a
+  first run. Behind a slow corporate firewall this can be the
+  bottleneck.
+
+If a bulk run is failing entirely with a 404, EPA has probably
+renamed a file — check the URLs at
+<https://echo.epa.gov/tools/data-downloads> and update `BULK_URLS` in
+`bulk_loader.py`.
+</script>
+<!-- BAKED_DOCS_END -->
 
 </body>
 </html>

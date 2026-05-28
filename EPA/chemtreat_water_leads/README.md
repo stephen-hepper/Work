@@ -393,7 +393,10 @@ chemtreat_water_leads/
 └── TODO.md           # Scoring/output follow-ups (D–G from the assessment)
 
 ../chemtreat_water_leads_viewer/
-├── index.html        # Single-page CSV viewer
+├── index.html        # Single-page CSV viewer (also bundles README /
+│                     # SCORING_GUIDE / COMMANDS as in-page doc tabs)
+├── bake_docs.py      # Re-embed the bundled docs after editing them:
+│                     # `python -m chemtreat_water_leads_viewer.bake_docs`
 └── RATIONALE.md      # Viewer design notes & gap list
 ```
 

@@ -2,6 +2,7 @@
 edits don't quietly drift back to the misleading wording.
 """
 
+import re
 import unittest
 from pathlib import Path
 
@@ -38,6 +39,28 @@ class TestViewerCopy(unittest.TestCase):
         self.assertIn("function coverageBar(", self.html)
         for cls in ("cov-with", "cov-nodata", "cov-failed"):
             self.assertIn(cls, self.html, f"missing coverage-bar class {cls}")
+
+    def test_doc_tabs_wired_and_content_baked(self):
+        """The README / Scoring Guide / Commands tabs read their content
+        from inline <script type="text/markdown"> blocks populated by
+        bake_docs.py. Pin that the renderer is wired and the sentinel
+        block has substantive content (so a stray edit that empties it
+        gets caught before someone opens the viewer)."""
+        self.assertIn("function renderMarkdown(", self.html)
+        self.assertIn("function renderDoc(", self.html)
+        for marker in ("<!-- BAKED_DOCS_START -->", "<!-- BAKED_DOCS_END -->"):
+            self.assertIn(marker, self.html, f"missing sentinel {marker}")
+        for doc_id in ("doc-readme", "doc-scoring", "doc-commands"):
+            m = re.search(
+                r'<script type="text/markdown" id="'
+                + doc_id + r'">(.*?)</script>',
+                self.html, re.S,
+            )
+            self.assertIsNotNone(m, f"missing inline tag {doc_id}")
+            self.assertGreater(
+                len(m.group(1)), 500,
+                f"{doc_id} content looks empty; run "
+                "`python -m chemtreat_water_leads_viewer.bake_docs`")
 
 
 if __name__ == "__main__":
