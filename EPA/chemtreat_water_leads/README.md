@@ -386,6 +386,7 @@ chemtreat_water_leads/
 ├── README.md         # Methodology — you are here
 ├── STARTING_GUIDE.md # First-time guide for sales-facing users
 ├── COMMANDS.md       # Practical run patterns & time estimates
+├── SCORING_GUIDE.md  # Two-pass scoring + which command produces which pass
 ├── DIAGRAM.md        # State map of bulk vs API depths
 ├── MEMORY.md         # Field-name traps & the silent-failure trail
 ├── RATIONALE.md      # Design decisions behind the bulk path
