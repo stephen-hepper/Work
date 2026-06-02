@@ -69,6 +69,15 @@ BULK_URLS = {
     "npdes":         "https://echo.epa.gov/files/echodownloads/npdes_downloads.zip",
     # SDWA datasets — quarterly refresh
     "sdwa":          "https://echo.epa.gov/files/echodownloads/SDWA_latest_downloads.zip",
+    # NPDES permit limits — pre-violation signal: what each facility is
+    # permitted to discharge. ~513 MB compressed, 7.2 GB unzipped, weekly.
+    # Stream-filtered against kept_npdes_permits so the unzipped size
+    # never lands in memory.
+    "npdes_limits":  "https://echo.epa.gov/files/echodownloads/npdes_limits.zip",
+    # NPDES-ATTAINS catchment linkage — pre-spatially-joined assignment
+    # of each NPDES outfall to downstream assessed waters with
+    # impairment status. ~100 MB compressed, weekly.
+    "npdes_attains": "https://echo.epa.gov/files/echodownloads/npdes_attains_downloads.zip",
 }
 
 CACHE_MAX_AGE_DAYS = 7   # ECHO refreshes weekly; cache for that long
@@ -903,6 +912,9 @@ def _build_lead_row(prog_raw: dict, program: str,
         "tag_lead_copper": False,
         "tag_major_facility": False,
         "tag_only_resolved_events": False,
+        "tag_treatable_permit": False,
+        "tag_discharges_to_impaired": False,
+        "tag_impairment_parameter_match": False,
         "tag_chemtreat_high_relevance": False,
         "__raw": prog_raw,
     }
@@ -1082,10 +1094,67 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
         raw = lead.get("__raw") or {}
         lead.update(scoring.compute_tags(raw))
 
-    # 4. Event load + drill-down — only when include_events is true.
-    # `--no-events` must produce facilities only, zero EPA calls.
+    # 4. Pre-violation signal augmentation. Gated by `include_events`
+    # so the `--no-events` contract ("zero downloads, fully offline";
+    # pinned by tests/test_no_events_flag.py) stays intact. Both feeds
+    # are NPDES-only — pipeline.run (API path) does not use them today.
+    # We load them BEFORE the event feeds so the re-score below picks
+    # up the new signals in time for `_drilldown_candidates` selection.
     events: list[dict] = []
     if include_events:
+        try:
+            limits_zip = _download_cached(BULK_URLS["npdes_limits"],
+                                          cache_dir, "npdes_limits")
+            permit_signals = stream_permit_limits(limits_zip, kept_npdes_permits)
+            permit_hits = 0
+            for lead in leads:
+                if lead["program"] != "CWA":
+                    continue
+                sig = permit_signals.get(lead["permit_id"])
+                if sig:
+                    lead.update(sig)
+                    # Mirror onto __raw so score_facility (in
+                    # _augment_leads below) sees the columns from the
+                    # raw dict — the scorer pulls from `f`, which is
+                    # __raw at scoring time.
+                    lead["__raw"].update(sig)
+                    permit_hits += 1
+            log.info("Applied permit-limit signals to %d CWA leads", permit_hits)
+        except Exception as e:
+            log.warning("Permit-limits bulk load failed: %s", e)
+
+        try:
+            attains_zip = _download_cached(BULK_URLS["npdes_attains"],
+                                            cache_dir, "npdes_attains")
+            impaired_signals = stream_attains_linkage(
+                attains_zip, kept_registry_ids, kept_npdes_permits)
+            impaired_hits = 0
+            for lead in leads:
+                # ATTAINS is keyed by RegistryID (the file's primary join
+                # key), so both CWA and SDWA leads can pick up signal —
+                # though SDWA's facility identity is the PWS, not the
+                # outfall, so hit-rate is much lower there.
+                sig = impaired_signals.get(lead["registry_id"])
+                if sig:
+                    lead.update(sig)
+                    lead["__raw"].update(sig)
+                    impaired_hits += 1
+            log.info("Applied ATTAINS impaired-water signals to %d leads",
+                     impaired_hits)
+        except Exception as e:
+            log.warning("ATTAINS bulk load failed: %s", e)
+
+        # Re-score with the new facility-level signals so the new rules
+        # (rule_treatable_permit_parameter, rule_discharges_to_impaired)
+        # contribute BEFORE drill-down candidate selection. Pass an
+        # empty events list — events haven't been loaded yet, and
+        # _augment_leads's events=[] path skips EVENT_RULES cleanly.
+        _augment_leads(leads, events=[])
+        leads.sort(key=lambda r: r["lead_score"], reverse=True)
+        log.info("Pre-violation augmentation complete: %d leads now scoring >= %d",
+                 sum(1 for L in leads if L["lead_score"] >= EVENT_DRILLDOWN_MIN_SCORE),
+                 EVENT_DRILLDOWN_MIN_SCORE)
+
         log.info("Downloading NPDES events…")
         try:
             npdes_zip = _download_cached(BULK_URLS["npdes"], cache_dir, "npdes")
