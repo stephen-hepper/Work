@@ -30,7 +30,7 @@ Computed for **every** lead, from the summary columns EPA returns in the
 facility listing (`get_qid` for the API path, ECHO Exporter columns for
 bulk). No per-violation detail; just counts and flags.
 
-`scoring.RULES` (8 rules):
+`scoring.RULES` (10 rules):
 
 | Rule | Points | Fires on |
 |---|---|---|
@@ -42,6 +42,8 @@ bulk). No per-violation detail; just counts and flags.
 | `rule_recent_inspection` | 5 | `CWPDaysLastInspection` between 0 and 180 |
 | `rule_treatable_permit_parameter` | 5/hit, cap 15 | Any `permit_has_*` column populated by `bulk_loader.stream_permit_limits` (npdes_limits.zip). **Bulk-only** — pipeline.run leaves these columns empty so the rule returns None. |
 | `rule_discharges_to_impaired` | 10 or 15 | `discharges_to_impaired=1` (any AU impaired) → +10; `matching_impaired_parameters` populated (effluent matches impairment cause) → +15 instead (no double-counting). Bulk-only, from `npdes_attains_downloads.zip`. |
+| `rule_recent_dmr_exceedance` | 5/8/10/12/15 | Tiered by `top_exceedance_pct` at thresholds 50 / 100 / 200 / 1000%. Bulk-only, from `npdes_dmrs_fy<YEAR>.zip`. |
+| `rule_exceeds_treatable_parameter` | 15 | Composite: any class in `exceeded_treatable_parameters_text` is also in `permit_has_*`. The strongest single signal in the system — "permit covers it AND they're exceeding it." Bulk-only. |
 
 The pass-1 score decides who clears `EVENT_DRILLDOWN_MIN_SCORE` (`50`,
 defined in `pipeline.py`) and gets drilled. Anyone below the threshold

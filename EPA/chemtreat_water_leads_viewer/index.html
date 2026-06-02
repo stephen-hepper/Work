@@ -1009,9 +1009,16 @@
     <div class="filter-group">
       <label>Pre-violation signals</label>
       <div class="chip-group" id="filterPreViolation">
-        <label class="chip" title="NPDES permit allows the facility to discharge a ChemTreat-treatable parameter (phosphorus, ammonia, TSS, BOD, oil/grease, metals, or chlorine residual). Pre-violation account-research signal."><input type="checkbox" value="treatable_permit" /> Permit covers our chemistry</label>
+        <label class="chip" title="NPDES permit allows the facility to discharge a ChemTreat-treatable parameter (phosphorus, ammonia, TSS, BOD, oil/grease, metals incl. Fe/Mn, cyanide, chlorine residual). Pre-violation account-research signal."><input type="checkbox" value="treatable_permit" /> Permit covers our chemistry</label>
         <label class="chip" title="Discharges into a 303(d)-impaired waterbody. State will tighten the permit; remediation conversation is coming."><input type="checkbox" value="discharges_to_impaired" /> Discharges to impaired water</label>
         <label class="chip" title="The facility's monitored effluent parameter matches a documented cause of the downstream waterbody's impairment. Highest-confidence pre-violation lead."><input type="checkbox" value="impairment_parameter_match" /> Effluent matches impairment cause</label>
+      </div>
+    </div>
+    <div class="filter-group">
+      <label>Active compliance signals</label>
+      <div class="chip-group" id="filterActiveCompliance">
+        <label class="chip" title="Facility has at least one Discharge Monitoring Report exceedance in the loaded fiscal year — they're currently over a permit limit for some parameter."><input type="checkbox" value="recent_exceedance" /> Currently exceeding a permit limit</label>
+        <label class="chip" title="Facility is permitted on AND currently exceeding the same ChemTreat-treatable parameter class. The strongest single signal in the system — sales call writes itself."><input type="checkbox" value="exceeds_treatable_parameter" /> Exceeding our chemistry parameter</label>
       </div>
     </div>
     <div class="filter-group">
@@ -1774,8 +1781,13 @@ function getFilters() {
   // tag must be True on the row to keep it. None checked = no filter
   // (default, so the chips are additive opt-in rather than restrictive).
   const preViolation = Array.from(document.querySelectorAll("#filterPreViolation input:checked")).map(c => c.value);
+  // Active-compliance chips (DMR exceedance signals). Same AND-semantics.
+  // The two chip groups feed the same tagTrue() helper; values map to
+  // tag_<value> column names.
+  const activeCompliance = Array.from(document.querySelectorAll("#filterActiveCompliance input:checked")).map(c => c.value);
   const search = document.getElementById("filterSearch").value.trim().toLowerCase();
-  return { states, program, minScore, statuses: statusBoxes, preViolation, search };
+  return { states, program, minScore, statuses: statusBoxes,
+           preViolation, activeCompliance, search };
 }
 
 // Tags persist through CSV as "True"/"False" strings; in the seed data
@@ -1794,6 +1806,12 @@ function applyFilters(rows) {
     if (f.statuses.length && !f.statuses.includes(r.status)) return false;
     if (f.preViolation.length) {
       for (const sig of f.preViolation) {
+        const col = "tag_" + sig;
+        if (!tagTrue(r[col])) return false;
+      }
+    }
+    if (f.activeCompliance.length) {
+      for (const sig of f.activeCompliance) {
         const col = "tag_" + sig;
         if (!tagTrue(r[col])) return false;
       }
@@ -1907,6 +1925,42 @@ function renderPreViolationBlock(r) {
     </div>`;
 }
 
+// Active compliance block (DMR exceedance signals). Renders the
+// worst-single-row exceedance from the loaded fiscal year DMR
+// archive, plus the count and the set of treatable classes exceeded.
+// Bolded when tag_exceeds_treatable_parameter is True — that's the
+// composite "permit covers it AND they're exceeding it" signal,
+// strongest in the system. Silently disappears for rows with no
+// exceedance signal.
+function renderActiveComplianceBlock(r) {
+  const param = r.top_exceeded_parameter;
+  const pct = r.top_exceedance_pct;
+  if (!param || pct === undefined || pct === null || pct === "") return "";
+  const pctNum = Number(pct);
+  if (!Number.isFinite(pctNum) || pctNum <= 0) return "";
+  const cap = pctNum >= 99999 ? "&ge; 99,999% (limit may be 0)" :
+              `<strong>${pctNum.toLocaleString(undefined,{maximumFractionDigits:0})}% over limit</strong>`;
+  const count = r.recent_dmr_exceedances_count;
+  const treatable = r.exceeded_treatable_parameters_text;
+  const isComposite = tagTrue(r.tag_exceeds_treatable_parameter);
+  const headerStyle = isComposite ? ' style="color: var(--danger, #b22222);"' : "";
+  const rows = [];
+  rows.push(
+    `<div class="k">Worst recent exceedance</div>` +
+    `<div class="v">${escapeHtml(param)} &mdash; ${cap}</div>`);
+  if (count) rows.push(
+    `<div class="k">Exceedance rows in archive</div>` +
+    `<div class="v">${escapeHtml(String(count))}</div>`);
+  if (treatable) rows.push(
+    `<div class="k">Treatable classes exceeded</div>` +
+    `<div class="v"${isComposite ? ' style="font-weight:600;"' : ""}>${escapeHtml(treatable)}</div>`);
+  return `
+    <div style="margin-top:14px;">
+      <h3 style="margin-bottom:4px;"${headerStyle}>Active compliance signals (DMR archive)</h3>
+      <div class="compliance-grid">${rows.join("")}</div>
+    </div>`;
+}
+
 function renderDetail(r) {
   const reasons = parseReasons(r.score_reasons);
   return `<div class="detail-panel">
@@ -1950,6 +2004,7 @@ function renderDetail(r) {
         ${renderHistory(r.compliance_history_13q)}
       </div>
       ${renderPreViolationBlock(r)}
+      ${renderActiveComplianceBlock(r)}
     </div>
     <div>
       <h3>Recent violation events</h3>
@@ -2450,6 +2505,11 @@ document.getElementById("filterPreViolation").addEventListener("change", e => {
   if (chip) chip.classList.toggle("active", e.target.checked);
   render();
 });
+document.getElementById("filterActiveCompliance").addEventListener("change", e => {
+  const chip = e.target.closest(".chip");
+  if (chip) chip.classList.toggle("active", e.target.checked);
+  render();
+});
 document.getElementById("filterSearch").addEventListener("input", render);
 
 document.getElementById("uploadBtn").addEventListener("click", () => {
@@ -2667,6 +2727,8 @@ inventory collapsed onto the same number.
 | `rule_recent_inspection` | 5 | EPA actively watching = facility under time pressure. |
 | `rule_treatable_permit_parameter` | 15 | **Pre-violation signal.** +5 per ChemTreat-treatable parameter class on the facility's NPDES permit (phosphorus, ammonia, TSS, BOD, oil/grease, metals — incl. Fe/Mn, cyanide, chlorine residual), capped. Reads `permit_has_*` columns populated by `bulk_loader.stream_permit_limits` from `npdes_limits.zip`. Bulk-only signal; pipeline.run leaves these columns empty and the rule cleanly returns None there. |
 | `rule_discharges_to_impaired` | 15 | **Pre-violation signal.** +10 when the facility discharges into any 303(d)-impaired waterbody; **+15 instead** when the facility's monitored E90 effluent parameter matches a documented cause of that impairment (rare, but high-confidence permit-tightening lead). Reads `discharges_to_impaired` / `matching_impaired_parameters` from `bulk_loader.stream_attains_linkage` (`npdes_attains_downloads.zip`). Bulk-only. |
+| `rule_recent_dmr_exceedance` | 15 | **Active-compliance signal.** Tiered by severity of the worst single Discharge Monitoring Report exceedance in the loaded fiscal year: +5 / +8 / +10 / +12 / +15 at the 50% / 100% / 200% / 1000% thresholds. Reads `top_exceedance_pct` from `bulk_loader.stream_dmr_exceedances` (`npdes_dmrs_fy<YEAR>.zip`). Bulk-only. |
+| `rule_exceeds_treatable_parameter` | 15 | **Active-compliance composite — strongest single signal in the system.** +15 when the facility is permitted on AND currently exceeding the same ChemTreat-treatable parameter class (e.g. permit covers phosphorus AND they blew their phosphorus limit last quarter). Reads `exceeded_treatable_parameters_text` ∩ `permit_has_*`. Bulk-only. |
 
 #### Event rules (`scoring.EVENT_RULES`)
 
@@ -3010,7 +3072,7 @@ Computed for **every** lead, from the summary columns EPA returns in the
 facility listing (`get_qid` for the API path, ECHO Exporter columns for
 bulk). No per-violation detail; just counts and flags.
 
-`scoring.RULES` (8 rules):
+`scoring.RULES` (10 rules):
 
 | Rule | Points | Fires on |
 |---|---|---|
@@ -3022,6 +3084,8 @@ bulk). No per-violation detail; just counts and flags.
 | `rule_recent_inspection` | 5 | `CWPDaysLastInspection` between 0 and 180 |
 | `rule_treatable_permit_parameter` | 5/hit, cap 15 | Any `permit_has_*` column populated by `bulk_loader.stream_permit_limits` (npdes_limits.zip). **Bulk-only** — pipeline.run leaves these columns empty so the rule returns None. |
 | `rule_discharges_to_impaired` | 10 or 15 | `discharges_to_impaired=1` (any AU impaired) → +10; `matching_impaired_parameters` populated (effluent matches impairment cause) → +15 instead (no double-counting). Bulk-only, from `npdes_attains_downloads.zip`. |
+| `rule_recent_dmr_exceedance` | 5/8/10/12/15 | Tiered by `top_exceedance_pct` at thresholds 50 / 100 / 200 / 1000%. Bulk-only, from `npdes_dmrs_fy<YEAR>.zip`. |
+| `rule_exceeds_treatable_parameter` | 15 | Composite: any class in `exceeded_treatable_parameters_text` is also in `permit_has_*`. The strongest single signal in the system — "permit covers it AND they're exceeding it." Bulk-only. |
 
 The pass-1 score decides who clears `EVENT_DRILLDOWN_MIN_SCORE` (`50`,
 defined in `pipeline.py`) and gets drilled. Anyone below the threshold
