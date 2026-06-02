@@ -29,6 +29,7 @@ from unittest.mock import patch
 from chemtreat_water_leads import bulk_loader
 from tests._fixtures import (
     make_attains_zip,
+    make_dmr_zip,
     make_exporter_zip,
     make_permit_limits_zip,
 )
@@ -81,10 +82,35 @@ class TestPermitAttainsIntegration(unittest.TestCase):
              "NPDES_ID": "TX0009999",
              "WATER_CONDITION": "Good"},
         ]
+        # DMR exceedances: phosphorus is BOTH permitted (above) AND
+        # being exceeded by 175% (tier 100-200 → +10). This should
+        # fire BOTH rule_recent_dmr_exceedance AND the composite
+        # rule_exceeds_treatable_parameter. Plus a non-treatable
+        # decoy row to confirm classifier doesn't false-positive.
+        dmr_rows = [
+            {"EXTERNAL_PERMIT_NMBR": "TX0009999",
+             "PARAMETER_DESC": "Phosphorus, total [as P]",
+             "LIMIT_VALUE_STANDARD_UNITS": "2.0",
+             "DMR_VALUE_STANDARD_UNITS": "5.5",
+             "STANDARD_UNIT_DESC": "mg/L",
+             "EXCEEDENCE_PCT": "175",
+             "MONITORING_PERIOD_END_DATE": "03/31/2026",
+             "NPDES_VIOLATION_ID": "VEX1",
+             "VIOLATION_CODE": "E90"},
+            # Decoy: non-treatable parameter exceeding. Should NOT
+            # fire the composite (no treatable class match), but the
+            # base rule still tracks the worst overall — which here
+            # is still phosphorus at 175%, NOT this decoy at 30%.
+            {"EXTERNAL_PERMIT_NMBR": "TX0009999",
+             "PARAMETER_DESC": "Whole effluent toxicity",
+             "EXCEEDENCE_PCT": "30",
+             "NPDES_VIOLATION_ID": "VDecoy"},
+        ]
 
         exporter_zip = make_exporter_zip(self.tmp_path, exporter_rows)
         limits_zip = make_permit_limits_zip(self.tmp_path, limits_rows)
         attains_zip = make_attains_zip(self.tmp_path, attains_rows)
+        dmr_zip = make_dmr_zip(self.tmp_path, dmr_rows)
 
         out_dir = self.tmp_path / "out"
         db_path = self.tmp_path / "snap.sqlite"
@@ -98,8 +124,9 @@ class TestPermitAttainsIntegration(unittest.TestCase):
                 "echo_exporter": exporter_zip,
                 "npdes_limits": limits_zip,
                 "npdes_attains": attains_zip,
-                # No event zips needed; the streamer mocks below
-                # return [] without ever opening a file.
+                "dmr_fy2026": dmr_zip,
+                # NPDES + SDWA event zips not needed — the streamer
+                # mocks below return [] without ever opening a file.
             }
             if name in mapping:
                 return mapping[name]
@@ -152,31 +179,76 @@ class TestPermitAttainsIntegration(unittest.TestCase):
                          "Phosphorus, total [as P]")
         self.assertEqual(row["impairment_causes_text"], "NUTRIENTS")
 
+        # DMR exceedance signals landed. top_exceeded_parameter is
+        # the WORST single row, which is the +175% phosphorus row,
+        # not the +30% decoy. exceeded_treatable_parameters_text
+        # carries only the treatable class (phosphorus), not the
+        # non-treatable decoy.
+        self.assertEqual(row["top_exceeded_parameter"],
+                         "Phosphorus, total [as P]")
+        self.assertEqual(float(row["top_exceedance_pct"]), 175.0)
+        self.assertEqual(row["exceeded_treatable_parameters_text"],
+                         "phosphorus")
+        # Count includes both rows (both are real exceedances), but
+        # only the treatable one drives the composite.
+        self.assertEqual(int(row["recent_dmr_exceedances_count"]), 2)
+
         # Tags follow.
         self.assertEqual(row["tag_treatable_permit"], "True")
         self.assertEqual(row["tag_discharges_to_impaired"], "True")
         self.assertEqual(row["tag_impairment_parameter_match"], "True")
+        self.assertEqual(row["tag_recent_exceedance"], "True")
+        self.assertEqual(row["tag_exceeds_treatable_parameter"], "True")
         self.assertEqual(row["tag_chemtreat_high_relevance"], "True")
 
-        # Score includes the new rule contributions. Expected
-        # composition for this row:
+        # Score includes ALL rule contributions. Expected composition:
         #   +40 rule_significant_violator (SNC flag + status text)
         #   +15 rule_treatable_permit_parameter (3 hits, capped)
         #   +15 rule_discharges_to_impaired (parameter-match branch)
-        #   = 70
-        # If this assertion ever fails on a value that's HIGHER, the
-        # cap math is broken; if it's LOWER, the wiring isn't getting
-        # the new signals into __raw before re-scoring. Either is a
-        # silent regression — pin the exact number.
-        self.assertEqual(int(row["lead_score"]), 70,
-            msg=f"Lead score {row['lead_score']} != 70; reasons: "
+        #   +10 rule_recent_dmr_exceedance (175% → 100-200 tier)
+        #   +15 rule_exceeds_treatable_parameter (phosphorus
+        #         permitted AND exceeded → composite)
+        #   +10 rule_active_open_events (2 DMR-archive events, each
+        #         emitted with status=Unresolved → 2 × 5 = 10)
+        #   = 105
+        # If HIGHER: cap math broken. If LOWER: wiring isn't getting
+        # the new signals into __raw before re-scoring, OR an
+        # expected rule didn't fire. Either is silent regression —
+        # pin the exact number.
+        self.assertEqual(int(row["lead_score"]), 105,
+            msg=f"Lead score {row['lead_score']} != 105; reasons: "
                 f"{row['score_reasons']}")
 
         # Score reasons string carries breakdown — sales must be able
-        # to read the pre-violation rules in the audit trail.
+        # to read every rule in the audit trail.
         reasons = row["score_reasons"]
         self.assertIn("treatable parameter", reasons.lower())
         self.assertIn("matching impaired", reasons.lower())
+        self.assertIn("dmr exceedance", reasons.lower())
+        self.assertIn("exceeding permitted", reasons.lower())
+
+        # Violation events CSV should carry the per-DMR detail
+        # populated — this is the depth gap the DMR archive integration
+        # was built to close. Both the treatable row AND the decoy
+        # land (both are real exceedances; the decoy just doesn't
+        # match a treatable class).
+        events_csv = run_dirs[0] / "violation_events.csv"
+        with events_csv.open() as fh:
+            event_rows = list(csv.DictReader(fh))
+        treatable_event = next(
+            (e for e in event_rows if e["violation_id"] == "VEX1"), None)
+        self.assertIsNotNone(treatable_event,
+            msg=f"DMR event VEX1 missing from violation_events.csv; "
+                f"got {[e['violation_id'] for e in event_rows]}")
+        # The per-DMR depth fields are exactly what the bulk
+        # NPDES_SE feed leaves as None. Pinned because closing this
+        # gap was the entire point of the integration.
+        self.assertEqual(treatable_event["parameter"],
+                         "Phosphorus, total [as P]")
+        self.assertEqual(treatable_event["limit_value"], "2.0")
+        self.assertEqual(treatable_event["dmr_value"], "5.5")
+        self.assertEqual(float(treatable_event["exceedance_pct"]), 175.0)
+        self.assertEqual(treatable_event["period_end"], "03/31/2026")
 
 
 if __name__ == "__main__":

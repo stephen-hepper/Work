@@ -78,6 +78,13 @@ BULK_URLS = {
     # of each NPDES outfall to downstream assessed waters with
     # impairment status. ~100 MB compressed, weekly.
     "npdes_attains": "https://echo.epa.gov/files/echodownloads/npdes_attains_downloads.zip",
+    # DMR archive — per-DMR-submission detail (parameter, limit,
+    # measured, exceedance %) for the current fiscal year. ~344 MB
+    # compressed / ~5 GB unzipped per FY; weekly refresh on current
+    # year. Stream-filtered. The cache key embeds the FY so a
+    # year-rollover triggers a redownload rather than re-using stale
+    # data.
+    "dmr_fy2026":    "https://echo.epa.gov/files/echodownloads/npdes_dmrs_fy2026.zip",
 }
 
 CACHE_MAX_AGE_DAYS = 7   # ECHO refreshes weekly; cache for that long
@@ -898,6 +905,7 @@ def _clamp_pct_for_display(pct: float) -> float:
 def stream_dmr_exceedances(
     zip_path: Path,
     kept_npdes_permits: set[str],
+    permit_to_registry: dict[str, str] | None = None,
 ) -> tuple[dict[str, dict], list[dict]]:
     """Build per-NPDES-permit exceedance signals AND per-row event
     rows from a DMR archive zip.
@@ -942,6 +950,7 @@ def stream_dmr_exceedances(
         log.info("No CWA permits in scope; skipping DMR exceedance scan.")
         return {}, []
 
+    permit_to_registry = permit_to_registry or {}
     out: dict[str, dict] = {}
     events: list[dict] = []
     # Per-permit accumulators: distinct treatable classes seen
@@ -1010,11 +1019,14 @@ def stream_dmr_exceedances(
                     pset.add(param_desc)
 
                 # ----- Per-row event payload -----
-                # registry_id left blank here; bulk_loader's wiring
-                # backfills it from kept_permit_to_registry the same
-                # way stream_npdes_violations does.
+                # registry_id backfilled from permit_to_registry (the
+                # same lookup table that backfills stream_npdes_violations
+                # events). Without this, the snapshot's
+                # events_by_key={(registry_id, program)} join in
+                # _augment_leads would silently drop these events.
                 events.append({
                     "violation_id": row.get("NPDES_VIOLATION_ID"),
+                    "registry_id": permit_to_registry.get(permit),
                     "permit_id": permit,
                     "npdes_id": permit,
                     "program": "CWA",
@@ -1140,6 +1152,8 @@ def _build_lead_row(prog_raw: dict, program: str,
         "tag_treatable_permit": False,
         "tag_discharges_to_impaired": False,
         "tag_impairment_parameter_match": False,
+        "tag_recent_exceedance": False,
+        "tag_exceeds_treatable_parameter": False,
         "tag_chemtreat_high_relevance": False,
         "__raw": prog_raw,
     }
@@ -1369,8 +1383,39 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
         except Exception as e:
             log.warning("ATTAINS bulk load failed: %s", e)
 
+        # DMR archive: per-permit exceedance signals + per-DMR event
+        # rows. Signals applied to leads here so the new rules
+        # (rule_recent_dmr_exceedance, rule_exceeds_treatable_parameter)
+        # contribute to pre-rescoring drill-down selection. Events held
+        # for later — they get appended AFTER the bulk NPDES/SDWA event
+        # feeds so that snapshot's per-violation_id upsert lets the
+        # DMR-archive emission overwrite the NPDES_SE emission's empty
+        # parameter fields. See stream_dmr_exceedances docstring for
+        # the dedup contract.
+        dmr_events: list[dict] = []
+        try:
+            dmr_zip = _download_cached(BULK_URLS["dmr_fy2026"],
+                                       cache_dir, "dmr_fy2026")
+            dmr_signals, dmr_events = stream_dmr_exceedances(
+                dmr_zip, kept_npdes_permits, permit_to_registry)
+            dmr_hits = 0
+            for lead in leads:
+                if lead["program"] != "CWA":
+                    continue
+                sig = dmr_signals.get(lead["permit_id"])
+                if sig:
+                    lead.update(sig)
+                    lead["__raw"].update(sig)
+                    dmr_hits += 1
+            log.info("Applied DMR exceedance signals to %d CWA leads "
+                     "(%d total event rows queued for persistence)",
+                     dmr_hits, len(dmr_events))
+        except Exception as e:
+            log.warning("DMR archive load failed: %s", e)
+
         # Re-score with the new facility-level signals so the new rules
-        # (rule_treatable_permit_parameter, rule_discharges_to_impaired)
+        # (rule_treatable_permit_parameter, rule_discharges_to_impaired,
+        # rule_recent_dmr_exceedance, rule_exceeds_treatable_parameter)
         # contribute BEFORE drill-down candidate selection. Pass an
         # empty events list — events haven't been loaded yet, and
         # _augment_leads's events=[] path skips EVENT_RULES cleanly.
@@ -1399,6 +1444,13 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
             ))
         except Exception as e:
             log.warning("SDWA bulk event load failed: %s", e)
+
+        # DMR-archive events go LAST so snapshot's per-violation_id
+        # upsert lets them overwrite the NPDES_SE emission's empty
+        # parameter fields. The two feeds share NPDES_VIOLATION_ID for
+        # ~82% of exceedance rows (verified in the live FY2026 file);
+        # the rest are DMR-only. Either way, DMR-last wins on conflict.
+        events.extend(dmr_events)
 
         # 4a. Phase-2 augmentation: re-score with events, set posture, set tags.
         _augment_leads(leads, events)

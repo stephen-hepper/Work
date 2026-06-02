@@ -49,7 +49,8 @@ class TestNoEventsFlag(unittest.TestCase):
              patch.object(bulk_loader, "stream_npdes_violations") as npdes_mock, \
              patch.object(bulk_loader, "stream_sdwa_violations") as sdwa_stream_mock, \
              patch.object(bulk_loader, "stream_permit_limits") as limits_mock, \
-             patch.object(bulk_loader, "stream_attains_linkage") as attains_mock:
+             patch.object(bulk_loader, "stream_attains_linkage") as attains_mock, \
+             patch.object(bulk_loader, "stream_dmr_exceedances") as dmr_mock:
             bulk_loader.run_bulk(
                 out_dir=out_dir,
                 db_path=db_path,
@@ -78,6 +79,8 @@ class TestNoEventsFlag(unittest.TestCase):
             msg="stream_permit_limits called under --no-events")
         self.assertEqual(attains_mock.call_count, 0,
             msg="stream_attains_linkage called under --no-events")
+        self.assertEqual(dmr_mock.call_count, 0,
+            msg="stream_dmr_exceedances called under --no-events")
 
         # The facility row still landed in the DB (persistence is
         # independent of event loading).
