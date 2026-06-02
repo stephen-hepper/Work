@@ -844,6 +844,217 @@ def stream_attains_linkage(
     return out
 
 
+# ----------------------------------------------------- DMR exceedances
+#
+# npdes_dmrs_fyYYYY.zip contains one row per (permit × outfall × parameter
+# × monitoring period × statistical basis) DMR submission across the fiscal
+# year. The exceedance column is server-side computed by EPA so we don't
+# have to do limit-vs-measured math — but it's spelled `EXCEEDENCE_PCT`
+# in the live file (EPA typo, not in their docs as `EXCEEDANCE_PCT`).
+# Verified against npdes_dmr_fy2026.csv 2026-05-30 refresh; do not
+# "correct" the spelling in the code without re-verifying first.
+#
+# File is ~5 GB unzipped per FY; stream-filter is mandatory.
+
+# How many distinct exceeded parameter descriptions to capture in
+# top_exceeded_parameter and exceeded_treatable_parameters_text per
+# permit. A permit with 20 different parameters all exceeding is a
+# crisis, but the viewer renders these as a single cell — caps at the
+# same ~15 as permitted_parameters_text.
+_MAX_EXCEEDED_PARAMS_SAMPLED = 15
+
+
+def _safe_pct(raw: str) -> float | None:
+    """Parse EXCEEDENCE_PCT into a float, or None for blank/unparseable.
+
+    EPA's column is sparsely populated — most rows are compliant and
+    leave it blank. A literal "0" also appears. We want None for both
+    so the rollup ignores them (only > 0 counts as an exceedance)."""
+    s = (raw or "").strip()
+    if not s:
+        return None
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    return v if v > 0 else None
+
+
+# When a permit's LIMIT_VALUE is 0, EPA reports EXCEEDENCE_PCT as
+# INT32_MAX (2,147,483,647 — verified in the live FY2026 file on
+# permits like AKG528836 "Seafood Processing Waste"). The value
+# encodes "infinite exceedance over a zero limit", not a real
+# percentage. The +15 tier still applies (it's correctly severe), but
+# the displayed raw number is meaningless. Clamp at 99,999% so the
+# CSV and viewer render a readable upper bound — anything above the
+# +15 tier threshold (1000%) is sorted equivalently anyway.
+_DISPLAY_EXCEEDANCE_CAP = 99_999.0
+
+
+def _clamp_pct_for_display(pct: float) -> float:
+    return min(pct, _DISPLAY_EXCEEDANCE_CAP)
+
+
+def stream_dmr_exceedances(
+    zip_path: Path,
+    kept_npdes_permits: set[str],
+) -> tuple[dict[str, dict], list[dict]]:
+    """Build per-NPDES-permit exceedance signals AND per-row event
+    rows from a DMR archive zip.
+
+    Returns ``(signals_by_permit, events)`` where:
+
+      signals_by_permit = {
+        npdes_id: {
+          "recent_dmr_exceedances_count": int,
+          "top_exceeded_parameter": str,
+          "top_exceedance_pct": float,
+          "exceeded_treatable_parameters_text": str,  # "bod | phosphorus"
+        }
+      }
+
+      events = [
+        {"violation_id", "registry_id", "program",
+         "parameter", "limit_value", "limit_unit",
+         "dmr_value", "dmr_unit", "exceedance_pct",
+         "period_end", "violation_code", "npdes_id",
+         "status", "stat_basis", ...},
+        ...
+      ]
+
+    The signals dict feeds rule_recent_dmr_exceedance and
+    rule_exceeds_treatable_parameter. The events list feeds
+    snapshot.diff_and_upsert_violations — these are exactly the
+    per-DMR rows the existing NPDES_SE/PS/CS streamer can't supply
+    parameter detail for (bulk NPDES violation files don't carry
+    LIMIT/DMR value columns). NPDES_VIOLATION_ID dedupes via the
+    violations table's PK, so where both feeds emit the same
+    violation_id, the DMR-archive emission overwrites the
+    NPDES_SE emission's empty parameter fields with the populated
+    ones.
+
+    Filter:
+      * `EXTERNAL_PERMIT_NMBR in kept_npdes_permits` (same filter as
+        stream_permit_limits — identical join key).
+      * `EXCEEDENCE_PCT > 0` (blank / 0 / unparseable rows skipped).
+    """
+    if not kept_npdes_permits:
+        log.info("No CWA permits in scope; skipping DMR exceedance scan.")
+        return {}, []
+
+    out: dict[str, dict] = {}
+    events: list[dict] = []
+    # Per-permit accumulators: distinct treatable classes seen
+    # exceeded, and distinct parameter descriptions for the text
+    # field. Tracked separately from `out` so the rollup at the end
+    # can render them.
+    treatable_by_permit: dict[str, set[str]] = {}
+    params_by_permit: dict[str, set[str]] = {}
+    rows_scanned = rows_kept = 0
+
+    with zipfile.ZipFile(zip_path) as zf:
+        # File pattern is NPDES_DMRS_FY<YEAR>.csv — match the suffix
+        # so we work across fiscal years without hard-coding.
+        target = next(
+            (n for n in zf.namelist()
+             if n.upper().startswith("NPDES_DMRS_FY")
+             and n.lower().endswith(".csv")),
+            None,
+        )
+        if target is None:
+            raise RuntimeError(
+                f"No NPDES_DMRS_FY*.csv inside {zip_path.name}; EPA may "
+                "have renamed the file — check "
+                "https://echo.epa.gov/tools/data-downloads"
+            )
+        log.info("Reading %s (filter: %d permit IDs in scope)",
+                 target, len(kept_npdes_permits))
+
+        with zf.open(target) as raw_fh:
+            text_fh = io.TextIOWrapper(raw_fh, encoding="utf-8",
+                                       errors="replace")
+            for row in csv.DictReader(text_fh):
+                rows_scanned += 1
+                permit = row.get("EXTERNAL_PERMIT_NMBR")
+                if not permit or permit not in kept_npdes_permits:
+                    continue
+                pct = _safe_pct(row.get("EXCEEDENCE_PCT"))
+                if pct is None:
+                    continue
+                param_desc = (row.get("PARAMETER_DESC") or "").strip()
+                if not param_desc:
+                    continue
+                rows_kept += 1
+
+                # ----- Per-permit rollup -----
+                # Clamp top_exceedance_pct for storage/display only;
+                # the event payload keeps the raw float so violation
+                # rows preserve the EPA sentinel for downstream audit.
+                clamped = _clamp_pct_for_display(pct)
+                sig = out.setdefault(permit, {
+                    "recent_dmr_exceedances_count": 0,
+                    "top_exceeded_parameter": param_desc,
+                    "top_exceedance_pct": clamped,
+                })
+                sig["recent_dmr_exceedances_count"] += 1
+                if clamped > sig["top_exceedance_pct"]:
+                    sig["top_exceedance_pct"] = clamped
+                    sig["top_exceeded_parameter"] = param_desc
+
+                cls = _classify_parameter(param_desc)
+                if cls is not None:
+                    treatable_by_permit.setdefault(permit, set()).add(cls)
+
+                pset = params_by_permit.setdefault(permit, set())
+                if len(pset) < _MAX_EXCEEDED_PARAMS_SAMPLED:
+                    pset.add(param_desc)
+
+                # ----- Per-row event payload -----
+                # registry_id left blank here; bulk_loader's wiring
+                # backfills it from kept_permit_to_registry the same
+                # way stream_npdes_violations does.
+                events.append({
+                    "violation_id": row.get("NPDES_VIOLATION_ID"),
+                    "permit_id": permit,
+                    "npdes_id": permit,
+                    "program": "CWA",
+                    "parameter": param_desc,
+                    "limit_value": row.get("LIMIT_VALUE_STANDARD_UNITS")
+                                   or row.get("LIMIT_VALUE_NMBR"),
+                    "limit_unit": row.get("STANDARD_UNIT_DESC")
+                                  or row.get("LIMIT_UNIT_DESC"),
+                    "dmr_value": row.get("DMR_VALUE_STANDARD_UNITS")
+                                 or row.get("DMR_VALUE_NMBR"),
+                    "dmr_unit": row.get("DMR_UNIT_DESC")
+                                or row.get("STANDARD_UNIT_DESC"),
+                    "exceedance_pct": pct,
+                    "period_end": row.get("MONITORING_PERIOD_END_DATE"),
+                    "violation_code": row.get("VIOLATION_CODE"),
+                    "stat_basis": row.get("STATISTICAL_BASE_TYPE_CODE"),
+                    "status": "Unresolved",
+                    "data_lag_note": CWA_LAG_NOTE,
+                })
+
+                if rows_scanned % 1_000_000 == 0:
+                    log.info("  DMR scanned %d rows, kept %d exceedances",
+                             rows_scanned, rows_kept)
+
+    # Finalize text fields.
+    for permit, classes in treatable_by_permit.items():
+        out[permit]["exceeded_treatable_parameters_text"] = " | ".join(
+            sorted(classes))
+    for permit, params in params_by_permit.items():
+        # No public column for this today; available via top_exceeded
+        # and the per-event detail. Stored anyway for future use; the
+        # snapshot upsert ignores keys it doesn't know.
+        out[permit]["exceeded_parameters_text"] = " | ".join(sorted(params))
+
+    log.info("DMR exceedances done: scanned %d rows, kept %d exceedance "
+             "rows across %d permits, emitted %d events",
+             rows_scanned, rows_kept, len(out), len(events))
+    return out, events
+
+
 # ----------------------------------------------------- main pipeline
 
 def _load_prior_scores(db_path: Path) -> dict[tuple[str, str], int]:

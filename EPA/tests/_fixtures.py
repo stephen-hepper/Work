@@ -147,3 +147,39 @@ def make_attains_zip(tmp_path: Path, rows: list[dict],
         _write_csv(zf, "NPDES_ATTAINS_AU_SUMMARIES.csv",
                    ATTAINS_SUMMARY_HEADER, rows)
     return path
+
+
+# Header verified against the real npdes_dmr_fy2026.zip / NPDES_DMRS_FY2026.csv,
+# 2026-05-30 refresh. The streamer only reads the columns below; the file
+# carries 56 cols total. NOTE: the column name is "EXCEEDENCE_PCT"
+# (EPA typo, not "EXCEEDANCE"). Do not "correct" without re-verifying
+# against a fresh download.
+DMR_HEADER = [
+    "EXTERNAL_PERMIT_NMBR",
+    "PERM_FEATURE_NMBR",
+    "PARAMETER_CODE",
+    "PARAMETER_DESC",
+    "LIMIT_VALUE_NMBR",
+    "LIMIT_VALUE_STANDARD_UNITS",
+    "LIMIT_UNIT_DESC",
+    "STANDARD_UNIT_DESC",
+    "DMR_VALUE_NMBR",
+    "DMR_VALUE_STANDARD_UNITS",
+    "DMR_UNIT_DESC",
+    "EXCEEDENCE_PCT",
+    "MONITORING_PERIOD_END_DATE",
+    "NPDES_VIOLATION_ID",
+    "VIOLATION_CODE",
+    "STATISTICAL_BASE_TYPE_CODE",
+]
+
+
+def make_dmr_zip(tmp_path: Path, rows: list[dict],
+                  fy: int = 2026,
+                  name: str = "npdes_dmr.zip") -> Path:
+    """Build NPDES_DMRS_FY<fy>.csv inside a zip mimicking the real
+    DMR archive shape. Streamer matches on the NPDES_DMRS_FY prefix."""
+    path = tmp_path / name
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        _write_csv(zf, f"NPDES_DMRS_FY{fy}.csv", DMR_HEADER, rows)
+    return path
