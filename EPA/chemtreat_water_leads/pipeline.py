@@ -160,6 +160,67 @@ def _flatten_facility(raw: dict, program: str) -> dict:
     }
 
 
+# How many consecutive HTTP 429s from EPA before we give up on the
+# remaining candidates in a fine-comb pass. EPA's throttle is by source
+# IP over a rolling window — once we trip it, the only fix is to wait
+# (or change IP). Grinding through thousands of leads at 1–2s/call when
+# every one comes back 429 burns hours, produces zero events, and
+# delays persistence of the bulk-derived data we already have in
+# memory. 20 in a row is the empirical "throttle is on, not a fluke"
+# threshold — observed during the 2026-06-02 nationwide run where
+# 1,700+ consecutive CWA calls 429'd without a single 200 in between.
+THROTTLE_STREAK_THRESHOLD = 20
+
+
+def _is_http_429(exc: BaseException) -> bool:
+    """True if `exc` is a requests HTTPError carrying a 429 response.
+
+    Kept narrow on purpose: only 429 increments the streak. Other
+    errors (network drops, JSON decode, 5xx server errors) are
+    transient and shouldn't trigger short-circuit — those facilities
+    are individually broken, not a sign that EPA is rate-limiting us
+    as a client.
+    """
+    # Defer the import so pipeline.py works in environments that
+    # haven't pulled `requests` (the bulk loader uses it; tests can
+    # synthesize duck-typed exceptions without it).
+    try:
+        import requests
+    except ImportError:
+        return False
+    if not isinstance(exc, requests.exceptions.HTTPError):
+        return False
+    resp = getattr(exc, "response", None)
+    return resp is not None and getattr(resp, "status_code", None) == 429
+
+
+def _short_circuit_remaining(remaining_leads,
+                             failed_out: set | None,
+                             missed_out: list[dict] | None,
+                             reason: str) -> int:
+    """Mark every still-unattempted candidate as failed and return the
+    count. Called when the 429 streak crosses
+    THROTTLE_STREAK_THRESHOLD. The viewer's run-health card surfaces
+    these as 'lookup failed — re-run later' rather than 'no records
+    on file', which is the truthful state: we never tried them
+    because EPA was throttling us."""
+    skipped = 0
+    for lead in remaining_leads:
+        # Same per-program eligibility checks the drill loops use — a
+        # CWA-only loop shouldn't penalize SDWA leads (and vice versa)
+        # that were in the candidate list for the OTHER drill function.
+        key = (lead.get("registry_id"), lead.get("program"))
+        if failed_out is not None and key[0]:
+            failed_out.add(key)
+        if missed_out is not None:
+            missed_out.append(lead)
+        skipped += 1
+    if skipped:
+        log.warning("%s — %d candidate(s) marked as lookup_failed for re-run",
+                    reason, skipped)
+    return skipped
+
+
 def _drill_cwa(leads: list[dict], start: str, end: str,
                events_out: list[dict],
                inter_call_sleep: float,
@@ -184,9 +245,16 @@ def _drill_cwa(leads: list[dict], start: str, end: str,
     each lead's *final* outcome. (A silently-throttled HTTP-200-empty
     response can't be told from genuine no-data here and counts as the
     latter — the effluent endpoint has no stub signature like DFR's.)
+
+    Throttle short-circuit: if EPA returns HTTP 429 on
+    THROTTLE_STREAK_THRESHOLD consecutive calls, the loop breaks and
+    every remaining eligible candidate is marked as failed via
+    `_short_circuit_remaining`. This stops a wedged fine-comb from
+    burning hours of wall-clock for zero events.
     """
     drilled = 0
-    for lead in leads:
+    streak = 0
+    for i, lead in enumerate(leads):
         if lead["program"] != "CWA" or not lead.get("permit_id"):
             continue
         before = len(events_out)
@@ -200,9 +268,11 @@ def _drill_cwa(leads: list[dict], start: str, end: str,
                 ev["status"] = "Unresolved"
                 ev["data_lag_note"] = CWA_LAG_NOTE
                 events_out.append(ev)
+            streak = 0   # any non-raising call resets the streak
         except Exception as e:
             errored = True
             log.warning("CWA event fetch failed for %s: %s", lead["permit_id"], e)
+            streak = streak + 1 if _is_http_429(e) else 0
         if len(events_out) > before:
             drilled += 1
         elif missed_out is not None:
@@ -210,6 +280,15 @@ def _drill_cwa(leads: list[dict], start: str, end: str,
         if failed_out is not None:
             key = (lead["registry_id"], lead["program"])
             failed_out.add(key) if errored else failed_out.discard(key)
+        if streak >= THROTTLE_STREAK_THRESHOLD:
+            _short_circuit_remaining(
+                (L for L in leads[i + 1:]
+                 if L["program"] == "CWA" and L.get("permit_id")),
+                failed_out, missed_out,
+                f"CWA fine-comb: {streak} consecutive HTTP 429s from EPA — "
+                f"aborting remaining drills"
+            )
+            break
         time.sleep(inter_call_sleep)
     return drilled
 
@@ -225,9 +304,12 @@ def _drill_sdwa(leads: list[dict], events_out: list[dict],
     throttle stubs and raises a warning, but `fetch_sdwa_violation_events`
     swallows that into a `[]` return, so here too only a raised exception
     (connection drop / read timeout) marks a lead as failed.
+
+    Same THROTTLE_STREAK_THRESHOLD short-circuit as `_drill_cwa`.
     """
     drilled = 0
-    for lead in leads:
+    streak = 0
+    for i, lead in enumerate(leads):
         if lead["program"] != "SDWA" or not lead.get("registry_id"):
             continue
         before = len(events_out)
@@ -237,10 +319,12 @@ def _drill_sdwa(leads: list[dict], events_out: list[dict],
                 ev["company"] = lead["company"]
                 ev["data_lag_note"] = SDWA_LAG_NOTE
                 events_out.append(ev)
+            streak = 0
         except Exception as e:
             errored = True
             log.warning("SDWA event fetch failed for %s: %s",
                         lead["registry_id"], e)
+            streak = streak + 1 if _is_http_429(e) else 0
         if len(events_out) > before:
             drilled += 1
         elif missed_out is not None:
@@ -248,6 +332,15 @@ def _drill_sdwa(leads: list[dict], events_out: list[dict],
         if failed_out is not None:
             key = (lead["registry_id"], lead["program"])
             failed_out.add(key) if errored else failed_out.discard(key)
+        if streak >= THROTTLE_STREAK_THRESHOLD:
+            _short_circuit_remaining(
+                (L for L in leads[i + 1:]
+                 if L["program"] == "SDWA" and L.get("registry_id")),
+                failed_out, missed_out,
+                f"SDWA fine-comb: {streak} consecutive HTTP 429s from EPA — "
+                f"aborting remaining drills"
+            )
+            break
         time.sleep(inter_call_sleep)
     return drilled
 
