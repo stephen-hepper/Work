@@ -91,6 +91,34 @@ FAC_COLUMNS: dict[str, str] = {
     "tag_major_facility":         "INTEGER",
     "tag_only_resolved_events":   "INTEGER",
     "tag_chemtreat_high_relevance": "INTEGER",
+    # Permit-limit signals (rolled up from npdes_limits.zip). Each
+    # permit_has_* is 0/1 — TRUE when at least one active permit limit
+    # on this facility's permit matches the ChemTreat-treatable class.
+    # Rolled up to facility level: one CWA permit can have many outfalls
+    # and many parameters; we collapse to "does any of them carry a
+    # treatable limit?".
+    "permit_has_phosphorus":      "INTEGER",
+    "permit_has_ammonia":         "INTEGER",
+    "permit_has_tss":             "INTEGER",
+    "permit_has_bod":             "INTEGER",
+    "permit_has_oil_grease":      "INTEGER",
+    "permit_has_metals":          "INTEGER",
+    "permit_has_chlorine_residual": "INTEGER",
+    "permitted_parameters_text":  "TEXT",  # pipe-joined sample (top ~10)
+    # ATTAINS-NPDES catchment linkage (rolled up from
+    # npdes_attains_downloads.zip / NPDES_ATTAINS_AU_SUMMARIES.csv).
+    # discharges_to_impaired is 0/1 — TRUE when ANY assessment unit
+    # touched by this facility carries an "Impaired*" WATER_CONDITION.
+    # matching_impaired_parameters is the rarer/stronger signal: the
+    # facility's E90-monitored parameters that match the waterbody's
+    # impairment causes (≈1% of leads, but each is a high-confidence
+    # tightening-permit lead).
+    "discharges_to_impaired":     "INTEGER",
+    "impairment_causes_text":     "TEXT",
+    "matching_impaired_parameters": "TEXT",
+    "tag_treatable_permit":       "INTEGER",
+    "tag_discharges_to_impaired": "INTEGER",
+    "tag_impairment_parameter_match": "INTEGER",
     # Legacy flag kept for backwards-compat with old DBs that only had
     # this column. Always equals tag_active_snc going forward; nothing
     # reads it today, but dropping it would break legacy diffs.

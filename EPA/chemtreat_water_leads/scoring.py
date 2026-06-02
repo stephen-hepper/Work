@@ -154,6 +154,55 @@ def rule_recent_inspection(f: dict):
     return None
 
 
+# Columns set by bulk_loader's permit-limits enrichment. Listed here
+# (not inline in the rule) so compute_tags can reuse the same list and
+# nothing drifts between rule + tag if a category is added or removed.
+PERMIT_HAS_COLS = (
+    "permit_has_phosphorus",
+    "permit_has_ammonia",
+    "permit_has_tss",
+    "permit_has_bod",
+    "permit_has_oil_grease",
+    "permit_has_metals",
+    "permit_has_chlorine_residual",
+)
+
+
+def rule_treatable_permit_parameter(f: dict):
+    """+5 per ChemTreat-treatable parameter class on the facility's
+    NPDES permit, capped at +15.
+
+    Pre-violation signal: the permit ALLOWS the facility to discharge
+    something we treat. Sales call doesn't depend on a current
+    violation - it's an account-research signal. Fired by bulk-loader
+    runs only; pipeline.run (API path) doesn't pull permit-limit data
+    today and these columns are absent there, so the rule cleanly
+    returns None (no false signal)."""
+    hits = sum(1 for c in PERMIT_HAS_COLS if f.get(c))
+    if not hits:
+        return None
+    pts = min(hits * 5, 15)
+    return pts, f"{hits} treatable parameter(s) on NPDES permit"
+
+
+def rule_discharges_to_impaired(f: dict):
+    """+10 if the facility discharges into a 303(d)-impaired waterbody,
+    or +15 if at least one of the facility's monitored effluent
+    parameters matches a cause of that impairment.
+
+    The parameter-match case (E90_POT_IMP_PARAMETERS populated in the
+    ATTAINS summary) is rarer and stronger: the state has documented
+    that THIS facility's discharge contributes to THIS waterbody's
+    impairment. Permit tightening is far more likely. Without the
+    match the rule still fires (+10) because the facility is in the
+    impairment's geographic footprint."""
+    if f.get("matching_impaired_parameters"):
+        return 15, "Discharges parameter matching impaired-waterbody cause"
+    if f.get("discharges_to_impaired"):
+        return 10, "Discharges to 303(d) impaired waterbody"
+    return None
+
+
 # ---------------------------------------------------------------- event rules
 
 def rule_active_open_events(_f: dict, events: list[dict]):
@@ -231,6 +280,8 @@ RULES: list[Rule] = [
     rule_major_facility,
     rule_recent_penalty,
     rule_recent_inspection,
+    rule_treatable_permit_parameter,
+    rule_discharges_to_impaired,
 ]
 
 EVENT_RULES: list[EventRule] = [
@@ -334,8 +385,22 @@ def compute_tags(facility: dict, events: list[dict] | None = None) -> dict:
         _event_status(e) in _INACTIVE_STATUSES for e in events
     )
 
+    # Permit-limit + ATTAINS tags. Bulk-only signal; pipeline.run
+    # (API path) doesn't pull these columns, so the keys are absent
+    # there and the tags evaluate cleanly to False.
+    tag_treatable_permit = any(facility.get(c) for c in PERMIT_HAS_COLS)
+    tag_to_impaired = bool(facility.get("discharges_to_impaired"))
+    tag_param_match = bool(facility.get("matching_impaired_parameters"))
+
+    # Composite — "if a rep had one filter, this is it". The pre-violation
+    # signals (treatable_permit, param_match) are OR-included so a permit
+    # that ALLOWS the facility to discharge ChemTreat-treatable parameters
+    # counts as high-relevance even without an open violation. Resolved-
+    # only events still demote the composite to False to preserve the
+    # do-not-call guardrail.
     tag_high_rel = (
-        (tag_active_snc or tag_tt or tag_mcl or tag_lc)
+        (tag_active_snc or tag_tt or tag_mcl or tag_lc
+         or tag_treatable_permit or tag_param_match)
         and not tag_only_resolved
     )
 
@@ -346,6 +411,9 @@ def compute_tags(facility: dict, events: list[dict] | None = None) -> dict:
         "tag_lead_copper": tag_lc,
         "tag_major_facility": tag_major,
         "tag_only_resolved_events": tag_only_resolved,
+        "tag_treatable_permit": tag_treatable_permit,
+        "tag_discharges_to_impaired": tag_to_impaired,
+        "tag_impairment_parameter_match": tag_param_match,
         "tag_chemtreat_high_relevance": tag_high_rel,
     }
 
