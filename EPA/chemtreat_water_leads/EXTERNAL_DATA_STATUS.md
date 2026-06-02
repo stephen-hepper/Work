@@ -14,8 +14,8 @@ external-data review. Update the **Status** column as work lands; keep
 
 | # | Recommendation | Status | Notes |
 |---|---|---|---|
-| 1 | NPDES Permit Limits (`npdes_limits.zip`, 459 MB, weekly) | `planned` | Pre-violation signal. See EXTERNAL_DATA_PLAN.md. |
-| 2 | ATTAINS-NPDES Catchment (`npdes_attains_downloads.zip`, 66 MB, weekly) | `planned` | Downstream-impairment signal. See EXTERNAL_DATA_PLAN.md. |
+| 1 | NPDES Permit Limits (`npdes_limits.zip`, 513 MB, weekly) | `shipped` | `rule_treatable_permit_parameter` (+5/hit, cap +15), `tag_treatable_permit`, `permit_has_*` + `permitted_parameters_text` columns. Real-data smoke confirmed 29/30 sampled permits produce signals. |
+| 2 | ATTAINS-NPDES Catchment (`npdes_attains_downloads.zip`, 103 MB, weekly) | `shipped` | `rule_discharges_to_impaired` (+10 plain / +15 on parameter-match), `tag_discharges_to_impaired`, `tag_impairment_parameter_match`, `discharges_to_impaired` + `impairment_causes_text` + `matching_impaired_parameters` columns. |
 | 3 | NPDES Effluent Violations Part 2 + DMR archives | `not-started` | Closes the bulk CWA per-DMR detail gap (currently None for parameter/limit/dmr/exceedance). Could deprecate the API fine-comb for CWA depth. |
 | 4 | Sewer Overflow / CSO / SSO events (daily refresh!) | `not-started` | POTW lead signal. The only EPA water dataset with daily cadence — collapses the 30–90d lag we have elsewhere. |
 | 5 | TRI Surface Water Releases (annual, via Envirofacts API or POLL_RPT bulk) | `not-started` | Per-facility, per-chemical lb/yr to surface water + POTW transfers. Joins on FRS RegistryID. |

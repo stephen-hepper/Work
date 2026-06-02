@@ -30,7 +30,7 @@ Computed for **every** lead, from the summary columns EPA returns in the
 facility listing (`get_qid` for the API path, ECHO Exporter columns for
 bulk). No per-violation detail; just counts and flags.
 
-`scoring.RULES` (6 rules, ~`scoring.py:227`):
+`scoring.RULES` (8 rules):
 
 | Rule | Points | Fires on |
 |---|---|---|
@@ -40,6 +40,8 @@ bulk). No per-violation detail; just counts and flags.
 | `rule_major_facility` | 10 | `CWPPermitTypes` contains "Major" (CWA only) |
 | `rule_recent_penalty` | 5 or 8 | `CWPTotalPenalties` ≥ $10K or $100K |
 | `rule_recent_inspection` | 5 | `CWPDaysLastInspection` between 0 and 180 |
+| `rule_treatable_permit_parameter` | 5/hit, cap 15 | Any `permit_has_*` column populated by `bulk_loader.stream_permit_limits` (npdes_limits.zip). **Bulk-only** — pipeline.run leaves these columns empty so the rule returns None. |
+| `rule_discharges_to_impaired` | 10 or 15 | `discharges_to_impaired=1` (any AU impaired) → +10; `matching_impaired_parameters` populated (effluent matches impairment cause) → +15 instead (no double-counting). Bulk-only, from `npdes_attains_downloads.zip`. |
 
 The pass-1 score decides who clears `EVENT_DRILLDOWN_MIN_SCORE` (`50`,
 defined in `pipeline.py`) and gets drilled. Anyone below the threshold

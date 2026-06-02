@@ -138,6 +138,8 @@ inventory collapsed onto the same number.
 | `rule_major_facility` | 10 | "Major" NPDES permits = high flow / high pollutant load = larger ChemTreat opportunity. CWA-only signal. |
 | `rule_recent_penalty` | 5–8 | Tiered by penalty size. CWA-only (SDW has no per-system penalty amount). |
 | `rule_recent_inspection` | 5 | EPA actively watching = facility under time pressure. |
+| `rule_treatable_permit_parameter` | 15 | **Pre-violation signal.** +5 per ChemTreat-treatable parameter class on the facility's NPDES permit (phosphorus, ammonia, TSS, BOD, oil/grease, metals, chlorine residual), capped. Reads `permit_has_*` columns populated by `bulk_loader.stream_permit_limits` from `npdes_limits.zip`. Bulk-only signal; pipeline.run leaves these columns empty and the rule cleanly returns None there. |
+| `rule_discharges_to_impaired` | 15 | **Pre-violation signal.** +10 when the facility discharges into any 303(d)-impaired waterbody; **+15 instead** when the facility's monitored E90 effluent parameter matches a documented cause of that impairment (rare, but high-confidence permit-tightening lead). Reads `discharges_to_impaired` / `matching_impaired_parameters` from `bulk_loader.stream_attains_linkage` (`npdes_attains_downloads.zip`). Bulk-only. |
 
 #### Event rules (`scoring.EVENT_RULES`)
 
