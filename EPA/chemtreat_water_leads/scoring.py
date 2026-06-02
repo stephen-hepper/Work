@@ -89,15 +89,23 @@ def rule_significant_violator(f: dict):
     A facility doesn't get tagged SNC for a one-off; this means recurring
     or large exceedances. Highest-value signal we have.
 
-    CWPSNCStatus is descriptive text, not a flag - we match by keyword.
-    SDW uses a different shape: SNC carries text and SNCFlag is the Y/N
-    flag; SeriousViolator is a separate boolean."""
+    Two detection paths, same +40 weight:
+      * Text: CWPSNCStatus / SNC carries descriptive text — we match
+        by keyword.
+      * Flag: SNCFlag / SeriousViolator is a Y/N boolean. The bulk
+        loader sets SNCFlag on BOTH CWA and SDWA program shapes when
+        the corresponding `*_SNC_FLAG` is "Y" — historically this
+        branch was SDWA-only, hence the now-misleading old "(SDWA)"
+        label. The reason string distinguishes the branches so a
+        reader can see which signal fired without inferring program
+        from somewhere else in the row.
+    """
     snc_status = str(f.get("CWPSNCStatus") or f.get("SNC") or "").upper()
     if any(t in snc_status for t in
            ("SIGNIFICANT", "SNC", "CATEGORY I", "ENFORCEMENT PRIORITY")):
-        return 40, "Significant Non-Complier (SNC)"
+        return 40, "Significant Non-Complier (SNC text)"
     if _is_yes(f.get("SNCFlag")) or _is_yes(f.get("SeriousViolator")):
-        return 40, "Significant Non-Complier (SDWA)"
+        return 40, "Significant Non-Complier (SNC flag)"
     return None
 
 
