@@ -552,6 +552,275 @@ def stream_sdwa_violations(zip_path: Path,
     return [_normalize_bulk_sdwa_event(e) for e in events]
 
 
+# ----------------------------------------------------- pre-violation signals
+#
+# Two new bulk feeds, both NPDES-side, both rolled up to a single dict
+# per join key so the augmentation step in run_bulk can `lead.update(sig)`.
+# See EXTERNAL_DATA_PLAN.md for the design and EXTERNAL_DATA_STATUS.md
+# for what other feeds are queued behind these.
+
+# Substring patterns for ChemTreat-treatable parameter classes. Matched
+# against PARAMETER_DESC (already upper-cased before comparison). Pinned
+# against empirical EPA wording verified from a fresh npdes_limits.zip
+# pull — see EXTERNAL_DATA_PLAN.md for the dump that informed each
+# entry. Adding a class here also needs a column in snapshot.py
+# (`permit_has_<class>`) and a corresponding entry in
+# `scoring.PERMIT_HAS_COLS`.
+_TREATABLE_PARAM_PATTERNS: dict[str, tuple[str, ...]] = {
+    "phosphorus":       ("PHOSPHORUS",),
+    "ammonia":          ("AMMONIA",),
+    # EPA renders TSS as "Solids, total suspended"; the "TSS" literal is
+    # rare but appears in older permits — keep both.
+    "tss":              ("TOTAL SUSPENDED", "TSS"),
+    # BOD has many wordings ("BOD, 5-day, 20 deg. C",
+    # "BOD, carbonaceous [5 day, 20 C]", etc); the "BOD" substring catches
+    # them all. "BIOCHEMICAL OXYGEN" is a backstop for rare spell-outs.
+    "bod":              ("BOD", "BIOCHEMICAL OXYGEN"),
+    # Both "Oil & Grease" and "Oil and grease" appear in the wild —
+    # different permit-writers prefer different forms.
+    "oil_grease":       ("OIL AND GREASE", "OIL & GREASE"),
+    "metals":           ("COPPER", "LEAD,", "ZINC", "NICKEL",
+                         "CHROMIUM", "CADMIUM"),
+    # "LEAD," (with the comma) avoids matching "LEADING" or
+    # "LEAD-COPPER" composite labels. EPA's metals parameters are always
+    # of the form "Lead, total recoverable" / "Lead, total dissolved".
+    "chlorine_residual": ("CHLORINE, TOTAL RESIDUAL",
+                          "TOTAL RESIDUAL CHLORINE"),
+}
+
+
+def _classify_parameter(param_desc: str) -> str | None:
+    """Return the ChemTreat-treatable class for a PARAMETER_DESC, or None.
+
+    Pure helper kept module-level so tests can assert pattern
+    coverage without owning the streamer's IO."""
+    up = param_desc.upper()
+    for cls, patterns in _TREATABLE_PARAM_PATTERNS.items():
+        if any(p in up for p in patterns):
+            return cls
+    return None
+
+
+# Cap on distinct PARAMETER_DESC values stored in
+# permitted_parameters_text. A typical permit has 5–15 parameters; some
+# major refineries push 40+. The viewer renders this as a single cell —
+# anything past ~15 just stretches the row and hides the SNC summary.
+_MAX_PERMITTED_PARAMS_SAMPLED = 15
+
+
+def stream_permit_limits(
+    zip_path: Path,
+    kept_npdes_permits: set[str],
+) -> dict[str, dict]:
+    """Build per-NPDES-permit signal dicts from npdes_limits.zip.
+
+    Returns ``{npdes_id: {permit_has_*: 1, permitted_parameters_text: "..."}}``.
+    Only permits in `kept_npdes_permits` are kept — the file is 7+ GB
+    unzipped and an unfiltered scan would balloon memory.
+
+    Filters:
+      * `EXTERNAL_PERMIT_NMBR in kept_npdes_permits` (the NPDES_ID).
+        The bulk export's `kept_npdes_permits` set is the same one
+        passed to `stream_npdes_violations`, so the join shape matches.
+      * `LIMIT_SET_STATUS_FLAG == 'A'` (active). Inactive limit-sets
+        carry expired permit revisions and would produce false positive
+        signals — empirically ~5% of rows are 'I'.
+
+    Per-permit rollup:
+      * Each `permit_has_<class>` flag is 1 iff at least one active
+        limit-set row on that permit has a PARAMETER_DESC matching the
+        class. Detail per-outfall / per-statistic-base is not preserved.
+      * `permitted_parameters_text` collects up to
+        ``_MAX_PERMITTED_PARAMS_SAMPLED`` distinct treatable parameter
+        descriptions, pipe-joined, alphabetized for stable diffs.
+        Non-treatable parameters (pH, Flow, temperature, etc.) are
+        intentionally NOT included — the goal is sales-call material,
+        not a permit dump.
+    """
+    if not kept_npdes_permits:
+        log.info("No CWA permits in scope; skipping permit-limits scan.")
+        return {}
+
+    out: dict[str, dict] = {}
+    seen_params: dict[str, set[str]] = {}
+    rows_scanned = rows_matched = 0
+
+    with zipfile.ZipFile(zip_path) as zf:
+        # The file is a single big CSV; the existing exporter selector
+        # (longest name in zip) would pick something wrong if EPA ever
+        # adds a sidecar — pin by suffix instead.
+        target = next(
+            (n for n in zf.namelist() if n.upper().endswith("NPDES_LIMITS.CSV")),
+            None,
+        )
+        if target is None:
+            raise RuntimeError(
+                f"No NPDES_LIMITS.csv found inside {zip_path.name}; "
+                "EPA may have renamed the file — check "
+                "https://echo.epa.gov/tools/data-downloads"
+            )
+        log.info("Reading %s (filter: %d permit IDs in scope)",
+                 target, len(kept_npdes_permits))
+
+        with zf.open(target) as raw_fh:
+            text_fh = io.TextIOWrapper(raw_fh, encoding="utf-8",
+                                       errors="replace")
+            for row in csv.DictReader(text_fh):
+                rows_scanned += 1
+                permit = row.get("EXTERNAL_PERMIT_NMBR")
+                if not permit or permit not in kept_npdes_permits:
+                    continue
+                if (row.get("LIMIT_SET_STATUS_FLAG") or "").strip().upper() != "A":
+                    continue
+                param_desc = (row.get("PARAMETER_DESC") or "").strip()
+                if not param_desc:
+                    continue
+                cls = _classify_parameter(param_desc)
+                if cls is None:
+                    continue
+                rows_matched += 1
+
+                sig = out.setdefault(permit, {})
+                sig[f"permit_has_{cls}"] = 1
+                params = seen_params.setdefault(permit, set())
+                if len(params) < _MAX_PERMITTED_PARAMS_SAMPLED:
+                    params.add(param_desc)
+
+                if rows_scanned % 1_000_000 == 0:
+                    log.info("  permit-limits scanned %d rows, %d matched",
+                             rows_scanned, rows_matched)
+
+    for permit, params in seen_params.items():
+        out[permit]["permitted_parameters_text"] = " | ".join(sorted(params))
+    log.info("Permit-limits done: scanned %d rows, kept signal for %d permits",
+             rows_scanned, len(out))
+    return out
+
+
+# WATER_CONDITION values observed in NPDES_ATTAINS_AU_SUMMARIES.csv
+# (sampled 500k rows from a real 2026-05-30 pull). Anything starting
+# "Impaired" counts as impaired regardless of restoration-plan status.
+# "Good", "Unknown", "Good - With Restoration Plan", and
+# "Unknown - With Restoration Plan" do NOT.
+def _is_impaired_condition(condition: str) -> bool:
+    return condition.strip().upper().startswith("IMPAIRED")
+
+
+def stream_attains_linkage(
+    zip_path: Path,
+    kept_registry_ids: set[str],
+    kept_npdes_permits: set[str],
+) -> dict[str, dict]:
+    """Build per-RegistryID ATTAINS signals from
+    npdes_attains_downloads.zip.
+
+    Returns ``{registry_id: {discharges_to_impaired: 1,
+                             impairment_causes_text: "...",
+                             matching_impaired_parameters: "..."}}``.
+
+    The summary file (`NPDES_ATTAINS_AU_SUMMARIES.csv`) carries one row
+    per (facility, assessment unit) — a single permit that drains into
+    three impaired units shows up three times. We roll up by REGISTRY_ID
+    because that's the lead-row key.
+
+    Join keys (OR'd):
+      * REGISTRY_ID in `kept_registry_ids` (almost always present).
+      * NPDES_ID in `kept_npdes_permits` (fallback — same defensive
+        pattern as `stream_npdes_violations`).
+
+    Signal extraction:
+      * `discharges_to_impaired`: any row's WATER_CONDITION starts with
+        "Impaired" (matches "Impaired", "Impaired - 303(d) Listed",
+        "Impaired - With Restoration Plan", etc.).
+      * `impairment_causes_text`: pipe-joined union of
+        CAUSE_GROUPS_IMPAIRED values across all rows. Sorted for stable
+        snapshot diffs.
+      * `matching_impaired_parameters`: pipe-joined union of
+        E90_POT_IMP_PARAMETERS — the facility's MONITORED effluent
+        parameters that the state has identified as causes of the
+        waterbody's impairment. Rare (~1% of rows in the sample) but
+        every match is a high-confidence permit-tightening lead.
+    """
+    if not kept_registry_ids and not kept_npdes_permits:
+        log.info("No registry IDs or permits in scope; skipping ATTAINS scan.")
+        return {}
+
+    out: dict[str, dict] = {}
+    causes_by_reg: dict[str, set[str]] = {}
+    params_by_reg: dict[str, set[str]] = {}
+    rows_scanned = rows_matched = 0
+
+    with zipfile.ZipFile(zip_path) as zf:
+        target = next(
+            (n for n in zf.namelist()
+             if n.upper().endswith("NPDES_ATTAINS_AU_SUMMARIES.CSV")),
+            None,
+        )
+        if target is None:
+            raise RuntimeError(
+                f"No NPDES_ATTAINS_AU_SUMMARIES.csv inside {zip_path.name}; "
+                "EPA may have renamed the file — check "
+                "https://echo.epa.gov/tools/data-downloads"
+            )
+        log.info("Reading %s (filter: %d registry IDs, %d permits in scope)",
+                 target, len(kept_registry_ids), len(kept_npdes_permits))
+
+        with zf.open(target) as raw_fh:
+            text_fh = io.TextIOWrapper(raw_fh, encoding="utf-8",
+                                       errors="replace")
+            for row in csv.DictReader(text_fh):
+                rows_scanned += 1
+                reg = row.get("REGISTRY_ID")
+                # Prefer registry-id join; fall back to NPDES_ID for the
+                # rare row where REGISTRY_ID is blank. Keep the resolved
+                # registry-id-or-None as the rollup key — without one
+                # we can't attach the signal to a lead.
+                if not reg or reg not in kept_registry_ids:
+                    permit = row.get("NPDES_ID")
+                    if not permit or permit not in kept_npdes_permits:
+                        continue
+                    # Unmatched registry_id but matched permit: we
+                    # still don't know the lead's registry_id from
+                    # here. Skip — bulk_loader's permit_to_registry
+                    # backfill is a separate concern (it backfills
+                    # event rows, not facility signals). In practice
+                    # 99%+ of NPDES_ATTAINS rows carry REGISTRY_ID so
+                    # this is a no-op edge case.
+                    continue
+                rows_matched += 1
+
+                sig = out.setdefault(reg, {})
+                condition = row.get("WATER_CONDITION") or ""
+                if _is_impaired_condition(condition):
+                    sig["discharges_to_impaired"] = 1
+                causes = (row.get("CAUSE_GROUPS_IMPAIRED") or "").strip()
+                if causes:
+                    bucket = causes_by_reg.setdefault(reg, set())
+                    for piece in causes.split("|"):
+                        piece = piece.strip()
+                        if piece:
+                            bucket.add(piece)
+                e90 = (row.get("E90_POT_IMP_PARAMETERS") or "").strip()
+                if e90:
+                    bucket = params_by_reg.setdefault(reg, set())
+                    for piece in e90.split("|"):
+                        piece = piece.strip()
+                        if piece:
+                            bucket.add(piece)
+
+                if rows_scanned % 500_000 == 0:
+                    log.info("  ATTAINS scanned %d rows, %d matched",
+                             rows_scanned, rows_matched)
+
+    for reg, causes in causes_by_reg.items():
+        out[reg]["impairment_causes_text"] = " | ".join(sorted(causes))
+    for reg, params in params_by_reg.items():
+        out[reg]["matching_impaired_parameters"] = " | ".join(sorted(params))
+    log.info("ATTAINS done: scanned %d rows, kept signal for %d facilities",
+             rows_scanned, len(out))
+    return out
+
+
 # ----------------------------------------------------- main pipeline
 
 def _load_prior_scores(db_path: Path) -> dict[tuple[str, str], int]:

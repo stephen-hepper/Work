@@ -90,3 +90,60 @@ def make_sdwa_zip(tmp_path: Path, rows: list[dict],
         _write_csv(zf, "SDWA_VIOLATIONS_ENFORCEMENT.csv",
                    SDWA_VIOLATION_HEADER, rows)
     return path
+
+
+# Headers verified against the real npdes_limits.zip
+# (NPDES_LIMITS.csv, 2026-05-30 refresh). The streamer reads only the
+# columns below; the full schema has ~50 cols but the rest are
+# numeric metadata we don't use.
+PERMIT_LIMITS_HEADER = [
+    "EXTERNAL_PERMIT_NMBR",
+    "LIMIT_SET_STATUS_FLAG",
+    "PARAMETER_CODE",
+    "PARAMETER_DESC",
+    "PERM_FEATURE_NMBR",
+    "STATISTICAL_BASE_CODE",
+]
+
+# Headers verified against the real npdes_attains_downloads.zip
+# (NPDES_ATTAINS_AU_SUMMARIES.csv, 2026-05-30 refresh).
+ATTAINS_SUMMARY_HEADER = [
+    "REGISTRY_ID",
+    "ECHO_DFR_URL",
+    "NPDES_ID",
+    "REPORTINGCYCLE",
+    "STATE",
+    "ASSESSMENTUNITIDENTIFIER",
+    "AU_URL",
+    "ASSESSMENTUNITNAME",
+    "WATER_CONDITION",
+    "POT_IMP_PARAMETERS",
+    "E90_POT_IMP_PARAMETERS",
+    "DRINKINGWATER_USE",
+    "ECOLOGICAL_USE",
+    "FISHCONSUMPTION_USE",
+    "RECREATION_USE",
+    "OTHER_USE",
+    "CAUSE_GROUPS_IMPAIRED",
+]
+
+
+def make_permit_limits_zip(tmp_path: Path, rows: list[dict],
+                            name: str = "npdes_limits.zip") -> Path:
+    """Build NPDES_LIMITS.csv inside a zip mimicking the real file shape."""
+    path = tmp_path / name
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        _write_csv(zf, "NPDES_LIMITS.csv", PERMIT_LIMITS_HEADER, rows)
+    return path
+
+
+def make_attains_zip(tmp_path: Path, rows: list[dict],
+                      name: str = "npdes_attains.zip") -> Path:
+    """Build NPDES_ATTAINS_AU_SUMMARIES.csv inside a zip mimicking the
+    real archive (we only emit the summaries CSV; the two larger
+    catchment/AU files the real archive ships aren't read by our code)."""
+    path = tmp_path / name
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        _write_csv(zf, "NPDES_ATTAINS_AU_SUMMARIES.csv",
+                   ATTAINS_SUMMARY_HEADER, rows)
+    return path
