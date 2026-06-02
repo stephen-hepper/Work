@@ -121,9 +121,27 @@ FAC_COLUMNS: dict[str, str] = {
     "discharges_to_impaired":     "INTEGER",
     "impairment_causes_text":     "TEXT",
     "matching_impaired_parameters": "TEXT",
+    # DMR exceedance signals (rolled up from npdes_dmrs_fyYYYY.zip).
+    # `recent_dmr_exceedances_count` is the count of rows in the
+    # archive with EXCEEDENCE_PCT > 0 for this permit; the others
+    # describe the worst-single-row exceedance and the union of
+    # ChemTreat-treatable parameter classes seen exceeded. Together
+    # they let rule_recent_dmr_exceedance and
+    # rule_exceeds_treatable_parameter fire — the latter is the
+    # composite that makes "permit covers ammonia AND they're
+    # currently exceeding ammonia" a single rule.
+    # Spelling note: EPA's column is EXCEEDENCE_PCT (sic). We use
+    # the correctly-spelled `exceedance` on our side; the streamer
+    # bridges the two.
+    "recent_dmr_exceedances_count": "INTEGER",
+    "top_exceeded_parameter":     "TEXT",
+    "top_exceedance_pct":         "REAL",
+    "exceeded_treatable_parameters_text": "TEXT",
     "tag_treatable_permit":       "INTEGER",
     "tag_discharges_to_impaired": "INTEGER",
     "tag_impairment_parameter_match": "INTEGER",
+    "tag_recent_exceedance":      "INTEGER",
+    "tag_exceeds_treatable_parameter": "INTEGER",
     # Legacy flag kept for backwards-compat with old DBs that only had
     # this column. Always equals tag_active_snc going forward; nothing
     # reads it today, but dropping it would break legacy diffs.

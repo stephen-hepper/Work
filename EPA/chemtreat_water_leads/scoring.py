@@ -212,6 +212,64 @@ def rule_discharges_to_impaired(f: dict):
     return None
 
 
+def rule_recent_dmr_exceedance(f: dict):
+    """Tiered severity of the worst single DMR exceedance in the loaded
+    fiscal-year archive. Reads `top_exceedance_pct` populated by
+    `bulk_loader.stream_dmr_exceedances`.
+
+    Tiers correlate with real-world conversation tone:
+      *   +5: 0–50% over — borderline, likely correctable in-process
+      *   +8: 50–100% over — genuine non-compliance
+      *  +10: 100–200% over — multiple-of-limit, sustained
+      *  +12: 200–1000% over — severe; enforcement likely already underway
+      *  +15: >1000% over — egregious; treatment system probably failing
+
+    Cap at +15 — same ceiling as other pre-violation rules so this
+    can't single-handedly dominate the score. Bulk-only; pipeline.run
+    (API path) doesn't pull DMR archives today."""
+    pct = _safe_float(f.get("top_exceedance_pct"))
+    if pct <= 0:
+        return None
+    if pct >= 1000:
+        return 15, f"DMR exceedance {pct:.0f}% over limit (severe)"
+    if pct >= 200:
+        return 12, f"DMR exceedance {pct:.0f}% over limit"
+    if pct >= 100:
+        return 10, f"DMR exceedance {pct:.0f}% over limit"
+    if pct >= 50:
+        return 8, f"DMR exceedance {pct:.0f}% over limit"
+    return 5, f"DMR exceedance {pct:.0f}% over limit"
+
+
+def rule_exceeds_treatable_parameter(f: dict):
+    """+15 when the facility's exceeded parameters overlap with the
+    ChemTreat-treatable classes their permit covers.
+
+    This is the strongest single signal in the system. It's no longer
+    "pre-violation" — it's "permit covers phosphorus AND they're
+    currently exceeding phosphorus." Sales call writes itself: "we
+    noticed you exceeded your phosphorus limit by X% last quarter and
+    your permit covers phosphorus — we make the chemistry that fixes
+    that."
+
+    `exceeded_treatable_parameters_text` is pipe-joined treatable
+    class names (e.g. "bod | phosphorus | metals"). PERMIT_HAS_COLS
+    is the canonical set of class column names. Intersection is the
+    match.
+    """
+    raw = f.get("exceeded_treatable_parameters_text") or ""
+    if not raw:
+        return None
+    exceeded = {c.strip() for c in raw.split("|") if c.strip()}
+    permitted = {c.replace("permit_has_", "")
+                 for c in PERMIT_HAS_COLS if f.get(c)}
+    matches = sorted(exceeded & permitted)
+    if not matches:
+        return None
+    return 15, ("Exceeding permitted, ChemTreat-treatable parameter: "
+                + ", ".join(matches))
+
+
 # ---------------------------------------------------------------- event rules
 
 def rule_active_open_events(_f: dict, events: list[dict]):
@@ -291,6 +349,8 @@ RULES: list[Rule] = [
     rule_recent_inspection,
     rule_treatable_permit_parameter,
     rule_discharges_to_impaired,
+    rule_recent_dmr_exceedance,
+    rule_exceeds_treatable_parameter,
 ]
 
 EVENT_RULES: list[EventRule] = [
@@ -401,15 +461,31 @@ def compute_tags(facility: dict, events: list[dict] | None = None) -> dict:
     tag_to_impaired = bool(facility.get("discharges_to_impaired"))
     tag_param_match = bool(facility.get("matching_impaired_parameters"))
 
-    # Composite — "if a rep had one filter, this is it". The pre-violation
-    # signals (treatable_permit, param_match) are OR-included so a permit
-    # that ALLOWS the facility to discharge ChemTreat-treatable parameters
-    # counts as high-relevance even without an open violation. Resolved-
-    # only events still demote the composite to False to preserve the
-    # do-not-call guardrail.
+    # DMR exceedance tags. tag_recent_exceedance is True for any
+    # populated top_exceedance_pct > 0. tag_exceeds_treatable_parameter
+    # is the composite: facility is permitted on AND currently
+    # exceeding at least one of the same treatable classes. This is
+    # the strongest single tag the system produces.
+    pct = facility.get("top_exceedance_pct")
+    try:
+        tag_recent_exc = pct is not None and float(pct) > 0
+    except (TypeError, ValueError):
+        tag_recent_exc = False
+    raw_exc = facility.get("exceeded_treatable_parameters_text") or ""
+    exceeded_set = {c.strip() for c in str(raw_exc).split("|") if c.strip()}
+    permitted_set = {c.replace("permit_has_", "")
+                     for c in PERMIT_HAS_COLS if facility.get(c)}
+    tag_exceeds_treatable = bool(exceeded_set & permitted_set)
+
+    # Composite — "if a rep had one filter, this is it". The pre-
+    # violation signals (treatable_permit, param_match) AND the
+    # active-compliance signal (exceeds_treatable) all OR-include on
+    # the positive side. Resolved-only events still demote to False
+    # to preserve the do-not-call guardrail.
     tag_high_rel = (
         (tag_active_snc or tag_tt or tag_mcl or tag_lc
-         or tag_treatable_permit or tag_param_match)
+         or tag_treatable_permit or tag_param_match
+         or tag_exceeds_treatable)
         and not tag_only_resolved
     )
 
@@ -423,6 +499,8 @@ def compute_tags(facility: dict, events: list[dict] | None = None) -> dict:
         "tag_treatable_permit": tag_treatable_permit,
         "tag_discharges_to_impaired": tag_to_impaired,
         "tag_impairment_parameter_match": tag_param_match,
+        "tag_recent_exceedance": tag_recent_exc,
+        "tag_exceeds_treatable_parameter": tag_exceeds_treatable,
         "tag_chemtreat_high_relevance": tag_high_rel,
     }
 
