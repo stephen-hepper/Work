@@ -78,13 +78,21 @@ class TestTreatableParameterRule(unittest.TestCase):
         pts, _ = scoring.rule_treatable_permit_parameter(f)
         self.assertEqual(pts, 15)
 
-    def test_cap_at_fifteen_even_with_seven_hits(self):
+    def test_cap_at_fifteen_with_every_class_hitting(self):
         """Cap exists because the rule otherwise dominates the score —
-        a facility with broad permits would hit +35 here and crowd out
-        the SNC/quarters signals the scorer is built around. Pinned
-        so future schema additions can't quietly raise the ceiling."""
+        a facility with broad permits would crowd out the SNC/quarters
+        signals the scorer is built around. Pinned so future schema
+        additions can't quietly raise the ceiling.
+
+        The count assertion is a guard: if PERMIT_HAS_COLS grows but
+        the rule's cap doesn't get re-reviewed, this test forces the
+        author to look at the cap. Bump the count if you add a class;
+        review the cap math in the same change."""
         f = {col: 1 for col in scoring.PERMIT_HAS_COLS}
-        self.assertEqual(len(scoring.PERMIT_HAS_COLS), 7)
+        self.assertEqual(len(scoring.PERMIT_HAS_COLS), 8,
+            msg="PERMIT_HAS_COLS count changed — re-review the +15 cap "
+                "in rule_treatable_permit_parameter and update this "
+                "assertion deliberately.")
         pts, _ = scoring.rule_treatable_permit_parameter(f)
         self.assertEqual(pts, 15)
 

@@ -588,11 +588,25 @@ _TREATABLE_PARAM_PATTERNS: dict[str, tuple[str, ...]] = {
     # Both "Oil & Grease" and "Oil and grease" appear in the wild —
     # different permit-writers prefer different forms.
     "oil_grease":       ("OIL AND GREASE", "OIL & GREASE"),
+    # Metals removal is precipitation chemistry — same product family
+    # regardless of which metal. IRON and MANGANESE are the highest-
+    # volume metals on real permits (~7.7k + ~4.4k rows in a recent
+    # sample) and a major scale/discoloration product line; the toxic
+    # metals (Cu, Pb, Zn, Ni, Cr, Cd) cover the plating / smelting
+    # / industrial wastewater niches. "LEAD," (with the comma) avoids
+    # matching "LEADING" — EPA's metals always appear as
+    # "Lead, total recoverable" / "Lead, dissolved".
     "metals":           ("COPPER", "LEAD,", "ZINC", "NICKEL",
-                         "CHROMIUM", "CADMIUM"),
-    # "LEAD," (with the comma) avoids matching "LEADING" or
-    # "LEAD-COPPER" composite labels. EPA's metals parameters are always
-    # of the form "Lead, total recoverable" / "Lead, total dissolved".
+                         "CHROMIUM", "CADMIUM",
+                         "IRON", "MANGANESE"),
+    # Cyanide gets its own bucket because cyanide remediation
+    # (alkaline chlorination / hydrogen peroxide oxidation) is a
+    # distinct product line from metals precipitation. Plating shops
+    # and electronics manufacturers are the canonical buyers. Real
+    # permits use "Cyanide, total [as CN]" / "Cyanide, free
+    # available" / "Cyanide, weak acid, dissociable" — all caught by
+    # the "CYANIDE" substring.
+    "cyanide":          ("CYANIDE",),
     "chlorine_residual": ("CHLORINE, TOTAL RESIDUAL",
                           "TOTAL RESIDUAL CHLORINE"),
 }

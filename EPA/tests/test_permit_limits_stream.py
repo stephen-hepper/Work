@@ -32,7 +32,9 @@ class TestClassifyParameter(unittest.TestCase):
     informed the choice so future pattern changes have to face them."""
 
     def test_real_phrases_classify_correctly(self):
-        # Wordings sampled from the live 2026-05-30 file.
+        # Wordings sampled from the live 2026-05-30 file. Row counts in
+        # comments are from a 1M-row sample — quick sanity that the
+        # class will fire on meaningful volume.
         cases = [
             ("BOD, 5-day, 20 deg. C", "bod"),
             ("BOD, carbonaceous [5 day, 20 C]", "bod"),
@@ -45,6 +47,22 @@ class TestClassifyParameter(unittest.TestCase):
             ("Lead, total recoverable", "metals"),
             ("Copper, total recoverable", "metals"),
             ("Zinc, total [as Zn]", "metals"),
+            # Iron / manganese added 2026-06-02 — high-volume metals
+            # (Iron ~7.7k + ~7.2k rows; Manganese ~4.4k + ~4.1k rows
+            # per 1M-row sample). Scale/discoloration product line,
+            # same precipitation chemistry → rolled into `metals`.
+            ("Iron, total [as Fe]", "metals"),
+            ("Iron, total recoverable", "metals"),
+            ("Iron, dissolved [as Fe]", "metals"),
+            ("Manganese, total [as Mn]", "metals"),
+            ("Manganese, dissolved [as Mn]", "metals"),
+            # Cyanide added 2026-06-02 as its own class — oxidation
+            # chemistry (alkaline chlorination / H2O2), distinct
+            # product line, plating-shop / electronics niche.
+            ("Cyanide, total [as CN]", "cyanide"),
+            ("Cyanide, free available", "cyanide"),
+            ("Cyanide, weak acid, dissociable", "cyanide"),
+            ("Cyanide, free [amenable to chlorination]", "cyanide"),
         ]
         for desc, expected in cases:
             with self.subTest(desc=desc):

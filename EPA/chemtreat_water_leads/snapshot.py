@@ -102,7 +102,12 @@ FAC_COLUMNS: dict[str, str] = {
     "permit_has_tss":             "INTEGER",
     "permit_has_bod":             "INTEGER",
     "permit_has_oil_grease":      "INTEGER",
+    # `metals` covers Cu/Pb/Zn/Ni/Cr/Cd plus Iron/Manganese — same
+    # precipitation chemistry, same product family.
     "permit_has_metals":          "INTEGER",
+    # Cyanide is its own bucket — oxidation chemistry, plating-shop
+    # niche. See bulk_loader._TREATABLE_PARAM_PATTERNS.
+    "permit_has_cyanide":         "INTEGER",
     "permit_has_chlorine_residual": "INTEGER",
     "permitted_parameters_text":  "TEXT",  # pipe-joined sample (top ~10)
     # ATTAINS-NPDES catchment linkage (rolled up from
