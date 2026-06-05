@@ -1961,6 +1961,43 @@ function renderActiveComplianceBlock(r) {
     </div>`;
 }
 
+// SDWA system-context block. Renders the PWS-side identity columns the
+// API path now exposes (population_served, system_type, owner_type,
+// primary_source). For CWA leads and for bulk-only SDWA leads (where
+// the ECHO Exporter doesn't carry PWS metadata) the block silently
+// disappears — same gating pattern as the pre-violation block uses for
+// rows without bulk pre-violation signals. Population is rendered as a
+// localized number so "Serves 60,000 people" parses cleanly at a glance.
+function renderSdwaContextBlock(r) {
+  if (r.program !== "SDWA") return "";
+  const popRaw = r.population_served;
+  const popNum = (popRaw === undefined || popRaw === null || popRaw === "")
+    ? null : Number(popRaw);
+  const popOk = popNum !== null && Number.isFinite(popNum) && popNum > 0;
+  const type = (r.system_type || "").trim();
+  const owner = (r.owner_type || "").trim();
+  const source = (r.primary_source || "").trim();
+  if (!popOk && !type && !owner && !source) return "";
+  const rows = [];
+  if (popOk) rows.push(
+    `<div class="k">Population served</div>` +
+    `<div class="v">${popNum.toLocaleString()} people</div>`);
+  if (type) rows.push(
+    `<div class="k">System type</div>` +
+    `<div class="v">${escapeHtml(type)}</div>`);
+  if (owner) rows.push(
+    `<div class="k">Owner</div>` +
+    `<div class="v">${escapeHtml(owner)}</div>`);
+  if (source) rows.push(
+    `<div class="k">Primary source</div>` +
+    `<div class="v">${escapeHtml(source)}</div>`);
+  return `
+    <div style="margin-top:14px;">
+      <h3 style="margin-bottom:4px;">System context (SDWA)</h3>
+      <div class="compliance-grid">${rows.join("")}</div>
+    </div>`;
+}
+
 function renderDetail(r) {
   const reasons = parseReasons(r.score_reasons);
   return `<div class="detail-panel">
@@ -2003,6 +2040,7 @@ function renderDetail(r) {
         <h3 style="margin-bottom:4px;">13-quarter compliance history</h3>
         ${renderHistory(r.compliance_history_13q)}
       </div>
+      ${renderSdwaContextBlock(r)}
       ${renderPreViolationBlock(r)}
       ${renderActiveComplianceBlock(r)}
     </div>

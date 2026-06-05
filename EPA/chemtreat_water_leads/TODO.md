@@ -28,18 +28,27 @@ Done items kept here for context; remove once they've shipped a release.
 
 ## Medium-leverage, medium change
 
-- [ ] **D. Externalize rule weights.** Replace inline literals (`return 40, ...`)
-  with a `WEIGHTS` dict at the top of `scoring.py`, or load from
-  `weights.yaml`. Sales feedback like "weight SNC less, TT more" becomes a
-  config change instead of a code review. **Urgency raised 2026-06:** with
-  10 facility rules + 5 event rules now in play (up from 6+5), the
-  config-vs-code-review delta is bigger. Worth doing before the next
-  weight-tuning conversation with sales.
+- [x] **D. Externalize rule weights.** Every numeric literal (base
+  points, multipliers, caps, tier thresholds, demote) lives in a single
+  flat `WEIGHTS` dict at the top of `scoring.py`. Rule bodies look up
+  into it; sales asks like "bump SNC, drop inspection" are a one-line
+  edit. Values unchanged in this refactor, so the 25+ pinned numeric
+  assertions across the test suite still hold. YAML loading deferred
+  until someone actually needs per-deploy overrides — `WEIGHTS =
+  yaml.safe_load(open("weights.yaml"))` is a 2-line swap if so.
 
-- [ ] **E. Expose dropped facility metadata.** Add `population_served`,
-  `system_type`, `owner_type`, `primary_source` columns from the SDWA response
-  to `all_leads.csv`. Add a `rule_population_served` that rewards systems
-  serving 3K+/10K+/50K+ people (revenue proxy for SDWA).
+- [x] **E. Expose dropped facility metadata.** Added `population_served`,
+  `system_type`, `owner_type`, `primary_source` columns to `all_leads.csv`,
+  populated from the SDWA API response by `pipeline._flatten_facility`
+  (echo_client already requested them via `SDW_WANTED_COLUMNS` — they
+  were dropped on the floor). New `rule_population_served` tiers
+  +10 / +7 / +4 at ≥50K / ≥10K / ≥3K served. Viewer's
+  `renderSdwaContextBlock` surfaces the four fields in the expanded-row
+  detail panel for SDWA leads. Bulk SDWA leads leave the cells empty
+  (ECHO Exporter doesn't carry PWS metadata at the facility level —
+  same asymmetry as `permit_has_*` going the other direction;
+  backfilling from the API fine-comb DFR response is a focused
+  follow-up).
 
 ## Lower-leverage, structural
 

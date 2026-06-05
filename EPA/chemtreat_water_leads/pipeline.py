@@ -125,6 +125,13 @@ def _flatten_facility(raw: dict, program: str) -> dict:
         "county": pick("FacCounty", "CWPCounty", "CountiesServed"),
         "naics": pick("FacNAICSCodes", "CWPNAICSCodes", "CWANAICS"),
         "sic": pick("FacSICCodes", "CWPSICCodes", "CWASICs"),
+        # SDWA-only context — present on the API path via SDW_WANTED_COLUMNS,
+        # absent for CWA leads (returns None cleanly). population_served also
+        # feeds scoring.rule_population_served.
+        "population_served": pick("PopulationServedCount"),
+        "system_type": pick("PWSTypeDesc"),
+        "owner_type": pick("OwnerDesc"),
+        "primary_source": pick("PrimarySourceDesc"),
         "permit_id": pick("SourceID", "NPDESPermitNumber", "NPDESId", "PWSId"),
         # Real EPA field names (verified via *.metadata). SDW uses unprefixed
         # names (SNC, Feas, QtrsWithVio); CWA uses CWP-prefixed names.
@@ -565,9 +572,16 @@ def _run_inner(states: list[str], out_dir: Path, db_path: Path,
     # Per-run folder so this run's CSVs don't overwrite a prior run's.
     run_dir = _run_output_dir(out_dir, "pipeline", states, run_start_ts)
     with snapshot.open_db(db_path) as conn:
-        fac_diff = snapshot.diff_and_upsert_facilities(conn, leads, now=run_start_ts)
-        viol_diff = snapshot.diff_and_upsert_violations(conn, events, now=run_start_ts)
-        snapshot.record_run(conn, notes=f"states={','.join(states)}", now=run_start_ts)
+        # record_run first so its returned run_id can be threaded through
+        # both upserts — every touched row gets a (run_id, key) entry in
+        # the run_*_membership tables. Same transaction, so a mid-run
+        # failure rolls back the run row too.
+        run_id = snapshot.record_run(
+            conn, notes=f"states={','.join(states)}", now=run_start_ts)
+        fac_diff = snapshot.diff_and_upsert_facilities(
+            conn, leads, run_id, now=run_start_ts)
+        viol_diff = snapshot.diff_and_upsert_violations(
+            conn, events, run_id, now=run_start_ts)
         # ---- 4. Write outputs -----------------------------------------
         today = datetime.utcnow().strftime("%Y%m%d")
         _write_lag_notice(run_dir)

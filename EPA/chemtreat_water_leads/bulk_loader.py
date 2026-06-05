@@ -1132,6 +1132,18 @@ def _build_lead_row(prog_raw: dict, program: str,
         "county": prog_raw.get("FacCounty"),
         "naics": prog_raw.get("FacNAICSCodes"),
         "sic": prog_raw.get("FacSICCodes"),
+        # SDWA-only PWS metadata. ECHO Exporter doesn't carry these at
+        # the facility level (verified empirically — see MEMORY.md
+        # "SDWA bulk has limited facility-level signals"), so bulk leads
+        # leave them None. Schema slot stays populated so snapshot's
+        # column shape matches across paths. API fine-comb DFR drills
+        # have the data in their response but don't currently backfill;
+        # if sales asks for bulk-side population coverage that's a
+        # focused follow-up on _drill_sdwa.
+        "population_served": None,
+        "system_type": None,
+        "owner_type": None,
+        "primary_source": None,
         "permit_id": prog_raw.get("SourceID"),
         "snc_status": snc_status,
         "violation_status": violation_status,
@@ -1519,10 +1531,16 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
     # Per-run folder so this run's CSVs don't overwrite a prior run's.
     run_dir = _run_output_dir(out_dir, "bulk", states, run_start_ts)
     with snapshot.open_db(db_path) as conn:
-        fac_diff = snapshot.diff_and_upsert_facilities(conn, leads, now=run_start_ts)
-        viol_diff = snapshot.diff_and_upsert_violations(conn, events, now=run_start_ts)
+        # record_run first so its returned run_id can be threaded through
+        # both upserts — every touched row gets a (run_id, key) entry in
+        # the run_*_membership tables. Same transaction, so a mid-run
+        # failure rolls back the run row too.
         notes = f"bulk_loader{' --no-events' if not include_events else ''}"
-        snapshot.record_run(conn, notes=notes, now=run_start_ts)
+        run_id = snapshot.record_run(conn, notes=notes, now=run_start_ts)
+        fac_diff = snapshot.diff_and_upsert_facilities(
+            conn, leads, run_id, now=run_start_ts)
+        viol_diff = snapshot.diff_and_upsert_violations(
+            conn, events, run_id, now=run_start_ts)
         today = datetime.utcnow().strftime("%Y%m%d")
         _write_lag_notice(run_dir)
         snapshot.dump_facilities_csv(conn, run_dir / "all_leads.csv", run_start_ts)

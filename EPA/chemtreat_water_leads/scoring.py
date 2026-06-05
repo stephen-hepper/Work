@@ -16,8 +16,10 @@ Two rule families:
     vs Resolved), ChemTreat-specific categories (Treatment Technique,
     MCL, Lead/Copper), and the "all resolved => do not call" demotion.
 
-Tuning the model is intentionally easy: edit RULES / EVENT_RULES below.
-Each rule is a plain function. Adding one is one function + one list entry.
+Tuning the model is intentionally easy: every numeric weight and tier
+threshold lives in the ``WEIGHTS`` dict below. Sales asks like "weight SNC
+less, treatment technique more" become a one-line edit. Adding a rule is
+one function + one entry in RULES/EVENT_RULES + one new key in WEIGHTS.
 
 This module also exposes two view-builders the pipeline merges into each
 output row:
@@ -35,6 +37,74 @@ from typing import Callable
 # demotions).
 Rule = Callable[[dict], tuple[int, str] | None]
 EventRule = Callable[[dict, list[dict]], tuple[int, str] | None]
+
+
+# ---------------------------------------------------------------- WEIGHTS
+#
+# Every numeric value that affects a score lives here. Rule bodies look up
+# into this dict; nothing else in the file (and nothing in the test suite)
+# should be edited to change a weight. Keys are kebab-style and grouped by
+# signal class so a sales-driven edit reads naturally: "bump
+# `dmr_exceedance_severe` from 15 to 18, drop `recent_inspection` to 3."
+#
+# What's NOT here on purpose:
+#   * EVENT_DRILLDOWN_MIN_SCORE / SECONDARY_DRILLDOWN_MIN_SCORE (routing
+#     thresholds, in pipeline.py / bulk_loader.py)
+#   * THROTTLE_STREAK_THRESHOLD (network behavior, in pipeline.py)
+#   * Viewer color tiers ≥110/80/60/40 (presentation, in index.html)
+#   * Display caps (_DISPLAY_EXCEEDANCE_CAP, _MAX_PERMITTED_PARAMS_SAMPLED
+#     in bulk_loader.py)
+# Each of these is behavioral or presentational, not part of the score
+# arithmetic, and conflating them muddles the dict's contract.
+
+WEIGHTS: dict[str, int] = {
+    # ---- enforcement-status (facility rules) -------------------------
+    "snc":                            40,
+    "chronic_per_quarter":             8,
+    "chronic_cap":                    32,
+    "formal_action":                  15,
+    "major_facility":                 10,
+    "penalty_large":                   8,    # ≥ $100K
+    "penalty_small":                   5,    # ≥ $10K
+    "penalty_large_threshold":   100_000,
+    "penalty_small_threshold":    10_000,
+    "recent_inspection":               5,
+    "recent_inspection_max_days":    180,
+    # ---- pre-violation (facility rules, bulk-only) -------------------
+    "treatable_permit_per_hit":        5,
+    "treatable_permit_cap":           15,
+    "impaired_water":                 10,
+    "impaired_parameter_match":       15,
+    # ---- active-compliance (facility rules, bulk-only) ---------------
+    "dmr_exceedance_severe":          15,    # > 1000%
+    "dmr_exceedance_high":            12,    # ≥  200%
+    "dmr_exceedance_moderate":        10,    # ≥  100%
+    "dmr_exceedance_noticeable":       8,    # ≥   50%
+    "dmr_exceedance_minor":            5,    # >    0%
+    "dmr_threshold_severe":         1000,
+    "dmr_threshold_high":            200,
+    "dmr_threshold_moderate":        100,
+    "dmr_threshold_noticeable":       50,
+    "exceeds_treatable_composite":    15,
+    # ---- SDWA revenue proxy (facility rule, API-only) ----------------
+    # Population served is a direct revenue proxy: a 50K-person utility
+    # is a far bigger account than a 200-person mobile-home park. The
+    # field is API-only — the ECHO Exporter doesn't carry it.
+    "population_large":               10,    # ≥ 50K
+    "population_medium":               7,    # ≥ 10K
+    "population_small":                4,    # ≥  3K
+    "population_large_threshold":  50_000,
+    "population_medium_threshold": 10_000,
+    "population_small_threshold":   3_000,
+    # ---- event rules -------------------------------------------------
+    "active_open_event_per":           5,
+    "active_open_event_cap":          25,
+    "treatment_technique_active":     20,
+    "mcl_active":                     15,
+    "lead_copper_event":              10,
+    "lead_copper_facility_flag":       5,
+    "only_resolved_demote":          -30,
+}
 
 
 # ---------------------------------------------------------------- helpers
@@ -89,7 +159,7 @@ def rule_significant_violator(f: dict):
     A facility doesn't get tagged SNC for a one-off; this means recurring
     or large exceedances. Highest-value signal we have.
 
-    Two detection paths, same +40 weight:
+    Two detection paths, same weight:
       * Text: CWPSNCStatus / SNC carries descriptive text — we match
         by keyword.
       * Flag: SNCFlag / SeriousViolator is a Y/N boolean. The bulk
@@ -103,9 +173,9 @@ def rule_significant_violator(f: dict):
     snc_status = str(f.get("CWPSNCStatus") or f.get("SNC") or "").upper()
     if any(t in snc_status for t in
            ("SIGNIFICANT", "SNC", "CATEGORY I", "ENFORCEMENT PRIORITY")):
-        return 40, "Significant Non-Complier (SNC text)"
+        return WEIGHTS["snc"], "Significant Non-Complier (SNC text)"
     if _is_yes(f.get("SNCFlag")) or _is_yes(f.get("SeriousViolator")):
-        return 40, "Significant Non-Complier (SNC flag)"
+        return WEIGHTS["snc"], "Significant Non-Complier (SNC flag)"
     return None
 
 
@@ -117,7 +187,7 @@ def rule_chronic_violation(f: dict):
                   or f.get("QtrsWithVio") or f.get("QtrsWithSNC"))
     if q == 0:
         return None
-    pts = min(q * 8, 32)
+    pts = min(q * WEIGHTS["chronic_per_quarter"], WEIGHTS["chronic_cap"])
     return pts, f"{q} quarter(s) in non-compliance"
 
 
@@ -128,7 +198,7 @@ def rule_formal_action(f: dict):
     n = _safe_int(f.get("CWPFormalEaCnt") or f.get("Feas"))
     if n == 0:
         return None
-    return 15, f"{n} formal enforcement action(s) in last 5 yr"
+    return WEIGHTS["formal_action"], f"{n} formal enforcement action(s) in last 5 yr"
 
 
 def rule_major_facility(f: dict):
@@ -138,7 +208,7 @@ def rule_major_facility(f: dict):
     permit_types = str(f.get("CWPPermitTypes") or "").upper()
     if "MAJOR" in permit_types and "NON-MAJOR" not in permit_types \
             and "NOT MAJOR" not in permit_types:
-        return 10, "Major-permit facility"
+        return WEIGHTS["major_facility"], "Major-permit facility"
     return None
 
 
@@ -146,10 +216,10 @@ def rule_recent_penalty(f: dict):
     """A recent monetary penalty is the clearest 'they're spending money
     on compliance right now' signal."""
     amt = _safe_float(f.get("CWPTotalPenalties"))
-    if amt >= 100_000:
-        return 8, f"Recent penalty ${amt:,.0f}"
-    if amt >= 10_000:
-        return 5, f"Recent penalty ${amt:,.0f}"
+    if amt >= WEIGHTS["penalty_large_threshold"]:
+        return WEIGHTS["penalty_large"], f"Recent penalty ${amt:,.0f}"
+    if amt >= WEIGHTS["penalty_small_threshold"]:
+        return WEIGHTS["penalty_small"], f"Recent penalty ${amt:,.0f}"
     return None
 
 
@@ -157,8 +227,8 @@ def rule_recent_inspection(f: dict):
     """Recent inspection + open violation = EPA is actively watching.
     Translates to urgency for the facility."""
     days = _safe_int(f.get("CWPDaysLastInspection"))
-    if 0 < days < 180:
-        return 5, f"Inspected {days} days ago"
+    if 0 < days < WEIGHTS["recent_inspection_max_days"]:
+        return WEIGHTS["recent_inspection"], f"Inspected {days} days ago"
     return None
 
 
@@ -178,8 +248,8 @@ PERMIT_HAS_COLS = (
 
 
 def rule_treatable_permit_parameter(f: dict):
-    """+5 per ChemTreat-treatable parameter class on the facility's
-    NPDES permit, capped at +15.
+    """+per_hit per ChemTreat-treatable parameter class on the facility's
+    NPDES permit, capped.
 
     Pre-violation signal: the permit ALLOWS the facility to discharge
     something we treat. Sales call doesn't depend on a current
@@ -190,25 +260,28 @@ def rule_treatable_permit_parameter(f: dict):
     hits = sum(1 for c in PERMIT_HAS_COLS if f.get(c))
     if not hits:
         return None
-    pts = min(hits * 5, 15)
+    pts = min(hits * WEIGHTS["treatable_permit_per_hit"],
+              WEIGHTS["treatable_permit_cap"])
     return pts, f"{hits} treatable parameter(s) on NPDES permit"
 
 
 def rule_discharges_to_impaired(f: dict):
-    """+10 if the facility discharges into a 303(d)-impaired waterbody,
-    or +15 if at least one of the facility's monitored effluent
-    parameters matches a cause of that impairment.
+    """Points if the facility discharges into a 303(d)-impaired
+    waterbody, with a higher tier when one of the facility's monitored
+    effluent parameters matches a cause of that impairment.
 
     The parameter-match case (E90_POT_IMP_PARAMETERS populated in the
     ATTAINS summary) is rarer and stronger: the state has documented
     that THIS facility's discharge contributes to THIS waterbody's
     impairment. Permit tightening is far more likely. Without the
-    match the rule still fires (+10) because the facility is in the
-    impairment's geographic footprint."""
+    match the rule still fires (lower tier) because the facility is in
+    the impairment's geographic footprint."""
     if f.get("matching_impaired_parameters"):
-        return 15, "Discharges parameter matching impaired-waterbody cause"
+        return (WEIGHTS["impaired_parameter_match"],
+                "Discharges parameter matching impaired-waterbody cause")
     if f.get("discharges_to_impaired"):
-        return 10, "Discharges to 303(d) impaired waterbody"
+        return (WEIGHTS["impaired_water"],
+                "Discharges to 303(d) impaired waterbody")
     return None
 
 
@@ -218,31 +291,35 @@ def rule_recent_dmr_exceedance(f: dict):
     `bulk_loader.stream_dmr_exceedances`.
 
     Tiers correlate with real-world conversation tone:
-      *   +5: 0–50% over — borderline, likely correctable in-process
-      *   +8: 50–100% over — genuine non-compliance
-      *  +10: 100–200% over — multiple-of-limit, sustained
-      *  +12: 200–1000% over — severe; enforcement likely already underway
-      *  +15: >1000% over — egregious; treatment system probably failing
+      *   minor: 0–50% over — borderline, likely correctable in-process
+      *   noticeable: 50–100% over — genuine non-compliance
+      *   moderate: 100–200% over — multiple-of-limit, sustained
+      *   high: 200–1000% over — severe; enforcement likely already underway
+      *   severe: >1000% over — egregious; treatment system probably failing
 
-    Cap at +15 — same ceiling as other pre-violation rules so this
-    can't single-handedly dominate the score. Bulk-only; pipeline.run
+    All weights and thresholds live in WEIGHTS. Bulk-only; pipeline.run
     (API path) doesn't pull DMR archives today."""
     pct = _safe_float(f.get("top_exceedance_pct"))
     if pct <= 0:
         return None
-    if pct >= 1000:
-        return 15, f"DMR exceedance {pct:.0f}% over limit (severe)"
-    if pct >= 200:
-        return 12, f"DMR exceedance {pct:.0f}% over limit"
-    if pct >= 100:
-        return 10, f"DMR exceedance {pct:.0f}% over limit"
-    if pct >= 50:
-        return 8, f"DMR exceedance {pct:.0f}% over limit"
-    return 5, f"DMR exceedance {pct:.0f}% over limit"
+    if pct >= WEIGHTS["dmr_threshold_severe"]:
+        return (WEIGHTS["dmr_exceedance_severe"],
+                f"DMR exceedance {pct:.0f}% over limit (severe)")
+    if pct >= WEIGHTS["dmr_threshold_high"]:
+        return (WEIGHTS["dmr_exceedance_high"],
+                f"DMR exceedance {pct:.0f}% over limit")
+    if pct >= WEIGHTS["dmr_threshold_moderate"]:
+        return (WEIGHTS["dmr_exceedance_moderate"],
+                f"DMR exceedance {pct:.0f}% over limit")
+    if pct >= WEIGHTS["dmr_threshold_noticeable"]:
+        return (WEIGHTS["dmr_exceedance_noticeable"],
+                f"DMR exceedance {pct:.0f}% over limit")
+    return (WEIGHTS["dmr_exceedance_minor"],
+            f"DMR exceedance {pct:.0f}% over limit")
 
 
 def rule_exceeds_treatable_parameter(f: dict):
-    """+15 when the facility's exceeded parameters overlap with the
+    """Points when the facility's exceeded parameters overlap with the
     ChemTreat-treatable classes their permit covers.
 
     This is the strongest single signal in the system. It's no longer
@@ -266,8 +343,28 @@ def rule_exceeds_treatable_parameter(f: dict):
     matches = sorted(exceeded & permitted)
     if not matches:
         return None
-    return 15, ("Exceeding permitted, ChemTreat-treatable parameter: "
-                + ", ".join(matches))
+    return (WEIGHTS["exceeds_treatable_composite"],
+            "Exceeding permitted, ChemTreat-treatable parameter: "
+            + ", ".join(matches))
+
+
+def rule_population_served(f: dict):
+    """SDWA-only revenue proxy. Tiered by `PopulationServedCount`:
+    a 50K-person utility is a meaningfully larger account than a
+    200-person mobile-home park, regardless of compliance status.
+
+    API-only. ECHO Exporter doesn't expose population at the facility
+    level, so bulk SDWA leads cleanly return None here (same pattern
+    as the bulk-only pre-violation rules going the other direction)."""
+    n = _safe_int(f.get("PopulationServedCount"))
+    if n >= WEIGHTS["population_large_threshold"]:
+        return (WEIGHTS["population_large"],
+                f"Serves {n:,} people (major system)")
+    if n >= WEIGHTS["population_medium_threshold"]:
+        return WEIGHTS["population_medium"], f"Serves {n:,} people"
+    if n >= WEIGHTS["population_small_threshold"]:
+        return WEIGHTS["population_small"], f"Serves {n:,} people"
+    return None
 
 
 # ---------------------------------------------------------------- event rules
@@ -278,7 +375,8 @@ def rule_active_open_events(_f: dict, events: list[dict]):
     n = sum(1 for e in events if _is_open_event(e))
     if n == 0:
         return None
-    pts = min(n * 5, 25)
+    pts = min(n * WEIGHTS["active_open_event_per"],
+              WEIGHTS["active_open_event_cap"])
     return pts, f"{n} open violation event(s)"
 
 
@@ -291,7 +389,8 @@ def rule_treatment_technique_active(_f: dict, events: list[dict]):
             and _is_active_event(e))
     if n == 0:
         return None
-    return 20, f"{n} active Treatment Technique violation(s)"
+    return (WEIGHTS["treatment_technique_active"],
+            f"{n} active Treatment Technique violation(s)")
 
 
 def rule_health_based_mcl_active(_f: dict, events: list[dict]):
@@ -303,7 +402,7 @@ def rule_health_based_mcl_active(_f: dict, events: list[dict]):
             and _is_active_event(e))
     if n == 0:
         return None
-    return 15, f"{n} active MCL violation(s)"
+    return WEIGHTS["mcl_active"], f"{n} active MCL violation(s)"
 
 
 def rule_lead_copper_active(f: dict, events: list[dict]):
@@ -314,11 +413,13 @@ def rule_lead_copper_active(f: dict, events: list[dict]):
             if "LEAD AND COPPER" in str(e.get("rule_family", "")).upper()
             and _is_active_event(e))
     if n > 0:
-        return 10, f"{n} active Lead/Copper Rule violation(s)"
+        return (WEIGHTS["lead_copper_event"],
+                f"{n} active Lead/Copper Rule violation(s)")
     # Fall back to the facility-level flags ECHO surfaces for SDWA.
     if _is_yes(f.get("PbViol")) or _is_yes(f.get("CuViol")) \
             or _is_yes(f.get("LeadAndCopperViol")):
-        return 5, "Lead/Copper history (facility flag)"
+        return (WEIGHTS["lead_copper_facility_flag"],
+                "Lead/Copper history (facility flag)")
     return None
 
 
@@ -330,7 +431,8 @@ def rule_only_resolved_demote(_f: dict, events: list[dict]):
     if not events:
         return None
     if all(_event_status(e) in _INACTIVE_STATUSES for e in events):
-        return -30, "All drilled events Resolved/Archived (verify before outreach)"
+        return (WEIGHTS["only_resolved_demote"],
+                "All drilled events Resolved/Archived (verify before outreach)")
     return None
 
 
@@ -351,6 +453,7 @@ RULES: list[Rule] = [
     rule_discharges_to_impaired,
     rule_recent_dmr_exceedance,
     rule_exceeds_treatable_parameter,
+    rule_population_served,
 ]
 
 EVENT_RULES: list[EventRule] = [

@@ -66,6 +66,16 @@ FAC_COLUMNS: dict[str, str] = {
     "county":                     "TEXT",
     "naics":                      "TEXT",
     "sic":                        "TEXT",
+    # SDWA-only context columns. PWS metadata comes back in the API's
+    # SDW response (echo_client.SDW_WANTED_COLUMNS) and is populated by
+    # pipeline._flatten_facility. ECHO Exporter doesn't carry these at
+    # the facility level, so bulk-only SDWA leads leave them NULL —
+    # same asymmetry as permit_has_* going the other direction.
+    # population_served is also the input to scoring.rule_population_served.
+    "population_served":          "INTEGER",
+    "system_type":                "TEXT",
+    "owner_type":                 "TEXT",
+    "primary_source":             "TEXT",
     "permit_id":                  "TEXT",
     # Compliance snapshot.
     "snc_status":                 "TEXT",
@@ -235,6 +245,31 @@ def _create_sql() -> str:
         run_at     TEXT,
         notes      TEXT
     );
+
+    -- Per-row run membership. Records every (run_id, row-key) the upsert
+    -- step touched, so "which runs did this facility appear in?" becomes
+    -- a single JOIN instead of fuzzy timestamp matching against runs.run_at.
+    -- "First seen in any run" is MIN(run_id) per key. The old
+    -- first_seen/last_seen ISO timestamps stay (back-compat) — these
+    -- tables are additive.
+    CREATE TABLE IF NOT EXISTS run_facility_membership (
+        run_id      INTEGER NOT NULL,
+        registry_id TEXT,
+        program     TEXT,
+        PRIMARY KEY (run_id, registry_id, program),
+        FOREIGN KEY (run_id) REFERENCES runs(run_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_rfm_facility
+        ON run_facility_membership(registry_id, program);
+
+    CREATE TABLE IF NOT EXISTS run_violation_membership (
+        run_id       INTEGER NOT NULL,
+        violation_id TEXT NOT NULL,
+        PRIMARY KEY (run_id, violation_id),
+        FOREIGN KEY (run_id) REFERENCES runs(run_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_rvm_violation
+        ON run_violation_membership(violation_id);
     """
 
 
@@ -324,12 +359,18 @@ _VIOL_UPSERT_SQL = _build_upsert(
 
 def diff_and_upsert_facilities(conn: sqlite3.Connection,
                                current: list[dict],
+                               run_id: int,
                                now: str | None = None) -> dict:
     """Compare `current` against DB, return diff dict, then upsert.
 
     `current` items are the dicts produced by `pipeline._flatten_facility`
     (after phase-2 re-scoring). Every key in `FAC_COLUMNS` is consulted
     via .get(); missing keys bind as NULL.
+
+    `run_id` is the id returned by `record_run()` for the current run.
+    Every facility this call touches gets a row in
+    `run_facility_membership` so future queries can answer "which runs
+    did this facility appear in?" via a single JOIN.
 
     Returns dict with keys: new, score_increased, newly_snc. The diff
     *logic* only inspects lead_score and snc/SNC fields — adding
@@ -387,6 +428,14 @@ def diff_and_upsert_facilities(conn: sqlite3.Connection,
             else:
                 binds.append(_coerce_for_db(col, f.get(col)))
         conn.execute(_FAC_UPSERT_SQL, binds)
+        # Membership row for this (run_id, facility-key). INSERT OR IGNORE
+        # so a `current` list that contains the same key twice in a single
+        # run doesn't trip the PK constraint.
+        conn.execute(
+            "INSERT OR IGNORE INTO run_facility_membership "
+            "(run_id, registry_id, program) VALUES (?, ?, ?)",
+            (run_id, key[0], key[1]),
+        )
 
     return {
         "new": new_rows,
@@ -403,8 +452,14 @@ def _looks_like_snc(text) -> bool:
 
 def diff_and_upsert_violations(conn: sqlite3.Connection,
                                current: list[dict],
+                               run_id: int,
                                now: str | None = None) -> dict:
     """Same pattern for individual violation events.
+
+    `run_id` plays the same role as in `diff_and_upsert_facilities`:
+    every event we successfully upsert also gets a row in
+    `run_violation_membership`. Events without a `violation_id` are
+    skipped on both sides (no upsert, no membership).
 
     Returns dict with keys: new, newly_resolved.
     A violation is "newly resolved" if status went Unresolved → Resolved
@@ -447,17 +502,31 @@ def diff_and_upsert_violations(conn: sqlite3.Connection,
             else:
                 binds.append(_coerce_for_db(col, v.get(col)))
         conn.execute(_VIOL_UPSERT_SQL, binds)
+        conn.execute(
+            "INSERT OR IGNORE INTO run_violation_membership "
+            "(run_id, violation_id) VALUES (?, ?)",
+            (run_id, vid),
+        )
 
     return {"new": new_rows, "newly_resolved": newly_resolved}
 
 
 def record_run(conn: sqlite3.Connection,
                notes: str = "",
-               now: str | None = None) -> None:
-    conn.execute(
+               now: str | None = None) -> int:
+    """Insert a row into `runs` and return its `run_id`.
+
+    Callers (`pipeline._run_inner`, `bulk_loader._run_bulk_inner`) hold
+    the returned id and pass it down to `diff_and_upsert_*` so each
+    touched facility/violation row gets a (run_id, key) entry in the
+    membership tables. Call this BEFORE the upserts so the foreign key
+    in the membership tables resolves.
+    """
+    cur = conn.execute(
         "INSERT INTO runs (run_at, notes) VALUES (?, ?)",
         (now or _now_iso(), notes),
     )
+    return cur.lastrowid
 
 
 # ----------------------------------------------------- CSV dumps
@@ -534,3 +603,37 @@ def _write_dump(path: str | Path, cols: list[str], rows) -> int:
             w.writerow([_coerce_for_csv(c, r[c]) for c in cols])
             n += 1
     return n
+
+
+# ----------------------------------------------------- run-membership reads
+#
+# Stable handles for ad-hoc "which rows did run N touch?" queries. Not
+# wired to any caller today; exist so consumers (CLI, viewer, future
+# reports) don't have to embed the membership-table schema themselves.
+
+def facilities_in_run(conn: sqlite3.Connection,
+                      run_id: int) -> list[sqlite3.Row]:
+    """Return every facility row touched by `run_id`, ranked by score."""
+    cols = FAC_CSV_COLUMNS
+    return list(conn.execute(
+        f"SELECT {', '.join('f.' + c for c in cols)} FROM facilities f "
+        "JOIN run_facility_membership m "
+        "  ON f.registry_id = m.registry_id AND f.program = m.program "
+        "WHERE m.run_id = ? "
+        "ORDER BY f.lead_score DESC, f.company",
+        (run_id,),
+    ))
+
+
+def violations_in_run(conn: sqlite3.Connection,
+                      run_id: int) -> list[sqlite3.Row]:
+    """Return every violation row touched by `run_id`."""
+    cols = VIOL_CSV_COLUMNS
+    return list(conn.execute(
+        f"SELECT {', '.join('v.' + c for c in cols)} FROM violations v "
+        "JOIN run_violation_membership m "
+        "  ON v.violation_id = m.violation_id "
+        "WHERE m.run_id = ? "
+        "ORDER BY v.registry_id, v.period_end DESC",
+        (run_id,),
+    ))
