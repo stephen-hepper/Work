@@ -67,17 +67,29 @@ From a Terminal window inside the project's `EPA/` folder:
 
 That's the whole command. **No `--states` flag means nationwide** —
 every state, DC, and territory. The first time you run it, EPA's
-weekly bulk files download (about 830 MB total, cached locally for 7
-days afterward).
+weekly bulk files download (about 2.2 GB total across six files,
+cached locally for 7 days afterward).
 
-The run takes ~15-30 minutes. Inside that one process it:
+The run takes ~10-30 minutes (faster on subsequent runs within the
+7-day cache window). Inside that one process it:
 
 1. Scans EPA's nationwide facility list (~1.5M rows) and keeps the
    ones with water-violation signals.
-2. Joins per-event details from EPA's bulk NPDES and SDWA event files.
-3. For high-scoring and newly-discovered leads, calls EPA's live API
-   to pull the richer per-event detail bulk doesn't carry.
-4. Saves everything to `snapshot.sqlite` and dumps a clean set of CSVs
+2. Adds **pre-violation signals** — which ChemTreat-treatable
+   parameters each permit covers (phosphorus, ammonia, TSS, BOD,
+   oil/grease, metals incl. iron/manganese, cyanide, chlorine
+   residual), and whether each facility discharges to a downstream
+   303(d)-impaired waterbody.
+3. Adds **active-compliance signals** — which facilities are
+   currently exceeding their permit limits this fiscal year, and on
+   which chemicals.
+4. Joins per-event details from EPA's bulk NPDES and SDWA event files.
+5. For high-scoring and newly-discovered leads, calls EPA's live API
+   to pull richer SDWA per-event detail bulk doesn't carry. (If
+   EPA's API is rate-limiting our IP, this step bails out gracefully
+   after a 20-call streak and the affected leads show up in Run
+   Health for a later re-run.)
+6. Saves everything to `snapshot.sqlite` and dumps a clean set of CSVs
    into `out/`.
 
 You don't invoke any of those stages separately — one command does
@@ -189,6 +201,31 @@ Standard browsing:
 - A **Newly SNC** badge means the facility just crossed into
   Significant Non-Complier status since the last run. These are the
   freshest signal sales has.
+
+**Two extra chip groups** for slicing by signal class:
+
+- **Pre-violation signals.** Use these to find leads *before* they've
+  failed. The chips:
+  - *Permit covers our chemistry* — facility's NPDES permit allows
+    discharge of a ChemTreat-treatable parameter. They're a buyer
+    even at 100% compliance.
+  - *Discharges to impaired water* — outfall is upstream of a 303(d)
+    waterbody. The state will tighten limits at next permit renewal.
+  - *Effluent matches impairment cause* — the strongest pre-violation
+    signal: state has documented that THIS facility's monitored
+    parameter causes the downstream impairment.
+
+- **Active compliance signals.** Use these to find leads currently
+  exceeding their limits:
+  - *Currently exceeding a permit limit* — any DMR exceedance in the
+    loaded fiscal year.
+  - *Exceeding our chemistry parameter* — **strongest single signal
+    in the system**: permit covers the parameter AND they're
+    currently exceeding it. Sales call writes itself.
+
+Both chip groups are AND-semantics: check multiple chips to narrow.
+The expanded-row view shows the underlying detail (which permitted
+parameters, which exceedances, how badly).
 
 ---
 

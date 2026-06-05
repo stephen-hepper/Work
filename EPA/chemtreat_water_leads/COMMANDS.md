@@ -294,12 +294,36 @@ Excel without parsing the score-reasons string:
 | `score_reasons` | string | Pipe-separated breakdown like `+40: SNC \| +32: 6 quarter(s) ... \| -30: All drilled events Resolved/Archived`. Negative entries demote do-not-call facilities. |
 | `outreach_posture` | enum | One word per facility — `active`, `enforcement_underway`, `verify_first`, `historical`, `no_events`. The one-glance "should I call?" indicator. |
 | `tag_active_snc` | bool | Facility currently flagged Significant Non-Complier. |
-| `tag_treatment_technique` | bool | Active Treatment Technique violation in events (highest ChemTreat-relevance category). |
+| `tag_treatment_technique` | bool | Active Treatment Technique violation in events (highest ChemTreat-relevance event category). |
 | `tag_mcl_violation` | bool | Active MCL violation (health-based). |
 | `tag_lead_copper` | bool | Active Lead/Copper Rule violation or facility-level Pb/Cu flag. |
 | `tag_major_facility` | bool | NPDES "Major" permit (high flow / high load — CWA only). |
 | `tag_only_resolved_events` | bool | Has drilled events, all Resolved/Archived. Sales should verify or skip. |
-| `tag_chemtreat_high_relevance` | bool | Composite: any of `active_snc / treatment_technique / mcl_violation / lead_copper` AND not `only_resolved_events`. The "if a rep had one filter, this is it" column. |
+| `tag_treatable_permit` | bool | NPDES permit covers a ChemTreat-treatable parameter class (phosphorus / ammonia / TSS / BOD / oil-grease / metals / cyanide / chlorine residual). Pre-violation signal — bulk-only. |
+| `tag_discharges_to_impaired` | bool | Outfall is upstream of a 303(d)-listed impaired waterbody. Bulk-only. |
+| `tag_impairment_parameter_match` | bool | Facility's monitored effluent parameter matches a documented cause of the downstream impairment. Strongest pre-violation signal. Bulk-only. |
+| `tag_recent_exceedance` | bool | Has at least one DMR exceedance in the loaded fiscal-year archive. Bulk-only. |
+| `tag_exceeds_treatable_parameter` | bool | Composite — permit covers AND facility is currently exceeding the same treatable class. **Strongest single signal in the system.** Bulk-only. |
+| `tag_chemtreat_high_relevance` | bool | Composite — fires when any of the above positive signals fire AND `tag_only_resolved_events` is False. The "if a rep had one filter, this is it" column. |
+
+Active-compliance columns (populated by the DMR-archive integration,
+bulk-only):
+
+| Column | Type | Use |
+|---|---|---|
+| `top_exceeded_parameter` | string | Parameter name with the worst single exceedance in the loaded FY archive. |
+| `top_exceedance_pct` | float | The exceedance % itself, clamped at 99,999 when EPA reports the INT32_MAX sentinel for zero-limit parameters. |
+| `exceeded_treatable_parameters_text` | string | Pipe-joined union of ChemTreat-treatable classes seen exceeded for the facility. |
+| `recent_dmr_exceedances_count` | int | Total exceedance rows in the FY archive for this permit. |
+
+Pre-violation columns (bulk-only):
+
+| Column | Type | Use |
+|---|---|---|
+| `permitted_parameters_text` | string | Pipe-joined sample of treatable parameter descriptions on the permit. |
+| `permit_has_*` | 0/1 | Per-class boolean (phosphorus / ammonia / TSS / BOD / oil-grease / metals / cyanide / chlorine residual). |
+| `impairment_causes_text` | string | Pipe-joined union of impairment causes for waterbodies the outfall touches. |
+| `matching_impaired_parameters` | string | Monitored effluent parameters that match an impairment cause — populates the strongest pre-violation tag. |
 
 The HTML viewer in `../chemtreat_water_leads_viewer/index.html` reads
 these columns directly — open it in a browser and use the Upload CSV
@@ -329,9 +353,16 @@ If a regional run is taking **much** longer than the estimates above:
   the per-permit `get_effluent_chart` and per-system DFR calls
   dominate. Tune `EVENT_DRILLDOWN_MIN_SCORE` in `pipeline.py` upward
   to limit the count.
-- **Network egress:** the bulk loader downloads ~370 MB total on a
-  first run. Behind a slow corporate firewall this can be the
-  bottleneck.
+- **Network egress:** the bulk loader downloads ~2.2 GB total
+  across six files on a first run. Behind a slow corporate firewall
+  this can be the bottleneck.
+- **HTTP 429 throttle on fine-comb:** EPA's `eff_rest_services` /
+  `dfr_rest_services` sometimes rate-limit our IP. The drill loops
+  short-circuit after a 20-streak of 429s, marking unattempted
+  candidates as `lookup_failed` in `run_health.json`. The viewer's
+  Run Health card surfaces a re-run command for the affected
+  states. Wait at least 30 minutes before re-running to give the
+  rolling window a chance to clear.
 
 If a bulk run is failing entirely with a 404, EPA has probably
 renamed a file — check the URLs at

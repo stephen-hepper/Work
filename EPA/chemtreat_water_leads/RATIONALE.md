@@ -268,3 +268,117 @@ from CSV alone.
   events but not API fallback, that's a five-line addition.
 - **Did not change the rule weights.** Externalizing weights is on
   TODO.md item D, separate from this refactor.
+
+---
+
+## Three signal classes (added 2026-06)
+
+**Decision.** The scoring rules are now organized into three
+distinct signal classes — enforcement-status, pre-violation, and
+active-compliance — and the viewer mirrors them as separate
+filter-chip groups.
+
+**Why this matters.** Pre-2026-06 the only signals we surfaced were
+*enforcement-status* — SNC listings, formal actions, paid penalties,
+chronic non-compliance. Every score reflected what EPA had already
+done. Sales conversations sounded like "we saw you got fined"
+(ambulance-chasing, bad).
+
+The three external-data integrations shipped in 2026-06 added two
+new signal classes:
+
+- **Pre-violation signals.** Fire on structural state that exists
+  independent of current compliance. `rule_treatable_permit_parameter`
+  reads what the NPDES permit *covers* (regardless of whether the
+  facility is in compliance); `rule_discharges_to_impaired` reads
+  whether the receiving water is on 303(d) (regardless of whether
+  the facility caused it). Sources: `npdes_limits.zip`,
+  `npdes_attains_downloads.zip`.
+
+- **Active-compliance signals.** Fire on per-DMR exceedance detail
+  from EPA's fiscal-year DMR archive. `rule_recent_dmr_exceedance`
+  tiers by severity (50%/100%/200%/1000% thresholds);
+  `rule_exceeds_treatable_parameter` is the composite that requires
+  BOTH the permit to cover AND the facility to be exceeding the
+  same treatable class. Source: `npdes_dmrs_fy<YEAR>.zip`.
+
+**Conversation tones map to classes.** Each class enables a
+different sales-call opener:
+
+| Class | Opener |
+|---|---|
+| Enforcement-status | "We see you've got a Significant Non-Complier designation — what's the remediation plan?" (after-the-fact) |
+| Pre-violation | "We noticed your permit covers phosphorus and the receiving water is on 303(d) for nutrients — your limits will tighten at next renewal" (account research) |
+| Active-compliance | "We see you exceeded TSS by 175% last quarter and your permit covers TSS — we make the chemistry that fixes that" (current opportunity) |
+
+The composite `tag_chemtreat_high_relevance` OR-includes signals
+from all three classes on the positive side; the do-not-call
+guardrail (`tag_only_resolved_events`) still gates it.
+
+---
+
+## DMR archive: per-DMR depth gap closed
+
+**Decision.** `bulk_loader.stream_dmr_exceedances` reads
+`npdes_dmrs_fy<YEAR>.zip` and emits BOTH per-permit signal dicts
+AND per-row event payloads. The events go into the same `events`
+list as `stream_npdes_violations` + `stream_sdwa_violations`,
+appended LAST so snapshot's per-`violation_id` upsert lets the
+DMR-archive emission overwrite the NPDES_SE emission's empty
+parameter fields.
+
+**Why.** Pre-2026-06 the bulk NPDES violation files
+(`NPDES_SE/PS/CS_VIOLATIONS.csv`) carried violation codes + dates
+but no per-DMR detail (parameter / limit / measured / exceedance %
+were all None on bulk-loaded events). The viewer's Run Health card
+called this the "depth gap" and offered a per-state API re-run
+command as a workaround. Shipping the DMR archive integration
+closes the gap nationally in a single bulk pass — no API fine-comb
+needed for CWA depth.
+
+**Ordering matters.** DMR signals apply BEFORE the pre-rescore so
+the two new rules contribute to drill-down candidate selection.
+DMR events append AFTER the existing bulk event feeds so dedup-on-
+violation_id resolves correctly. See `_run_bulk_inner` in
+`bulk_loader.py` for the exact sequencing.
+
+**EPA spelling typo.** The exceedance column is `EXCEEDENCE_PCT`
+(misspelled). EPA's own docs say `EXCEEDANCE_PCT`. The streamer,
+the fixtures, and the test all pin the typo deliberately. See
+MEMORY.md Trap 12.
+
+**INT32_MAX sentinel.** EPA reports `2,147,483,647` when the
+permit's `LIMIT_VALUE` is 0 (zero-discharge parameters). Clamped at
+99,999% for display; raw value preserved in event payload for
+downstream audit. See MEMORY.md Trap 13.
+
+---
+
+## Fine-comb 429 short-circuit (added 2026-06-02)
+
+**Decision.** `_drill_cwa` and `_drill_sdwa` in `pipeline.py` track
+consecutive HTTP 429 responses and break the loop after
+`THROTTLE_STREAK_THRESHOLD = 20`. Remaining eligible candidates are
+marked `lookup_failed` via `_short_circuit_remaining`, populated in
+`run_health.json`, and surfaced in the viewer.
+
+**Why.** The 2026-06-02 nationwide run wedged for ~2 hours when
+EPA throttled our IP — every fine-comb call after a ~20-call burst
+returned 429, but the per-permit `try/except` kept the loop running
+at 1–2 s/call producing zero events while sitting on 177k
+bulk-derived events that hadn't yet been persisted. The
+short-circuit drops wedge time to ~40 seconds while preserving
+correct accounting (failed candidates show up for re-run, not as
+"no records on file").
+
+**Why narrow.** Only HTTP 429 increments the streak. Per-facility
+network drops, 5xx errors, and `EpaBotBlocked` (which has its own
+retry path) all reset the streak. A 429 streak is *EPA's IP-level
+throttle is on*; everything else is a single-facility issue and
+shouldn't take down the whole drill.
+
+**Threshold of 20.** Empirical: in the 2026-06-02 wedge, 1,700+
+consecutive 429s came back with zero successes between them — the
+throttle is on or off, not flaky. 20 is comfortably past
+"intermittent" without making the user wait too long when the
+throttle is real.

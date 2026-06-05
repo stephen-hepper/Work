@@ -166,11 +166,23 @@ matters more than a few points of AUC on a marketing dataset.
 In addition to the score, every row gets two view-builders worth of
 output for sales-side filtering:
 
-- **Tags** (`scoring.compute_tags`): seven booleans — `tag_active_snc`,
-  `tag_treatment_technique`, `tag_mcl_violation`, `tag_lead_copper`,
-  `tag_major_facility`, `tag_only_resolved_events`, and the composite
-  `tag_chemtreat_high_relevance`. Sales filters in Excel on these to
-  pare 7,000 rows into the 50 they want without parsing reason strings.
+- **Tags** (`scoring.compute_tags`): twelve booleans organized into three classes —
+  - *Event-driven (5):* `tag_active_snc`, `tag_treatment_technique`,
+    `tag_mcl_violation`, `tag_lead_copper`, `tag_major_facility`,
+    plus the do-not-call guardrail `tag_only_resolved_events`.
+  - *Pre-violation (3):* `tag_treatable_permit`,
+    `tag_discharges_to_impaired`, `tag_impairment_parameter_match` —
+    populated from `npdes_limits.zip` + `npdes_attains_downloads.zip`.
+    Bulk-only.
+  - *Active-compliance (2):* `tag_recent_exceedance`,
+    `tag_exceeds_treatable_parameter` — populated from
+    `npdes_dmrs_fy<YEAR>.zip`. Bulk-only. The composite is the
+    strongest single signal in the system.
+  - *Composite (1):* `tag_chemtreat_high_relevance` — OR-includes
+    every positive signal above, AND-excludes
+    `tag_only_resolved_events` (the do-not-call guardrail).
+  Sales filters in Excel on these to pare 7,000 rows into the 50
+  they want without parsing reason strings.
 - **`outreach_posture`** (`scoring.compute_outreach_posture`): one word
   per facility — `active`, `enforcement_underway`, `verify_first`,
   `historical`, or `no_events`. A one-glance "should I call?"
@@ -380,21 +392,23 @@ Subsequent runs produce useful diffs.
 ```
 chemtreat_water_leads/
 ├── __init__.py
-├── echo_client.py    # ECHO REST API client — one place to change endpoints
-├── scoring.py        # Rules, tags, outreach_posture — edit here to tune
-├── sdwa_codes.py     # SDWA reference code lookups (bulk-loader path)
-├── snapshot.py       # SQLite diff/state — extend schema as new fields land
-├── pipeline.py       # API-based orchestration (regional / state pulls)
-├── bulk_loader.py    # CSV-based orchestration (nationwide pulls)
-├── _health.py        # Run-health JSON writer + WarningCollector log handler
-├── README.md         # Methodology — you are here
-├── STARTING_GUIDE.md # First-time guide for sales-facing users
-├── COMMANDS.md       # Practical run patterns & time estimates
-├── SCORING_GUIDE.md  # Two-pass scoring + which command produces which pass
-├── DIAGRAM.md        # State map of bulk vs API depths
-├── MEMORY.md         # Field-name traps & the silent-failure trail
-├── RATIONALE.md      # Design decisions behind the bulk path
-└── TODO.md           # Scoring/output follow-ups (D–G from the assessment)
+├── echo_client.py             # ECHO REST API client — one place to change endpoints
+├── scoring.py                 # Rules, tags, outreach_posture — edit here to tune
+├── sdwa_codes.py              # SDWA reference code lookups (bulk-loader path)
+├── snapshot.py                # SQLite diff/state — extend schema as new fields land
+├── pipeline.py                # API-based orchestration (regional / state pulls)
+├── bulk_loader.py             # CSV-based orchestration (nationwide pulls) + permit/ATTAINS/DMR streamers
+├── _health.py                 # Run-health JSON writer + WarningCollector log handler
+├── README.md                  # Methodology — you are here
+├── STARTING_GUIDE.md          # First-time guide for sales-facing users
+├── COMMANDS.md                # Practical run patterns & time estimates
+├── SCORING_GUIDE.md           # Two-pass scoring + which command produces which pass
+├── DIAGRAM.md                 # State map of bulk vs API depths
+├── MEMORY.md                  # Field-name traps & the silent-failure trail
+├── RATIONALE.md               # Design decisions behind the bulk path
+├── EXTERNAL_DATA_STATUS.md    # Running status of external-data integrations (Tier 1/2/3)
+├── EXTERNAL_DATA_PLAN.md      # Original plan for the permit-limits + ATTAINS integration (historical)
+└── TODO.md                    # Scoring/output follow-ups (D–G from the assessment)
 
 ../chemtreat_water_leads_viewer/
 ├── index.html        # Single-page CSV viewer (also bundles README /
@@ -438,16 +452,24 @@ methodology assessment:
   (`score_snc`, `score_chronic`, …) so sales can pivot on individual
   contributions instead of parsing the reason string.
 
-Plus three open issues outside the scoring layer:
+Plus two open issues outside the scoring layer:
 
 - **Retry-on-empty for state-wide queries** — LA/OH CWA queries
   sometimes return empty without a QID under rapid-fire pacing. The
   DFR-retry pattern in `fetch_sdwa_violation_events` could be lifted
   to `_qid_workflow`.
-- **`EVENT_DRILLDOWN_MIN_SCORE` tuning** — currently 50, with no CWA
-  leads reaching it (top CWA score in the latest TX run was 47). Either
-  drop the threshold for CWA or split per-program thresholds.
 - **Email digest of `new_*.csv`** — pandas + SMTP, ~30 lines.
+
+**Note:** `EVENT_DRILLDOWN_MIN_SCORE` (50) tuning was on this list
+historically when no CWA leads reached the threshold. The
+pre-violation + active-compliance integrations shipped 2026-06-02
+fixed that — top CWA scores now reach 187, and ~10K leads land at
+or above 50 nationwide. The threshold is the right value as of the
+2026-06-02 run.
+
+For the broader external-data trajectory (Tiers 2–3: sewer overflow
+events, TRI water releases, UCMR5 PFAS, etc.), see
+`EXTERNAL_DATA_STATUS.md`.
 
 For a longer running list (scaffolding, ideas not scored above), open
 `TODO.md`. For the EPA-API gotcha history, see `MEMORY.md`.

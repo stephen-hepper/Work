@@ -239,6 +239,49 @@ Filters, sort order, and the expanded row reset on every page reload.
 Reps run this once per morning; persistence would add storage and
 privacy considerations for very little benefit.
 
+### 5z. Pre-violation + active-compliance chip groups (added 2026-06)
+
+The filter bar now carries three chip groups instead of one:
+
+1. **Status** (original) — Unresolved / Addressed / Resolved /
+   Archived / NoEvents. AND-semantics across checked chips.
+2. **Pre-violation signals** (added with the permit-limits + ATTAINS
+   integration). Three chips:
+   - Permit covers our chemistry (`tag_treatable_permit`)
+   - Discharges to impaired water (`tag_discharges_to_impaired`)
+   - Effluent matches impairment cause
+     (`tag_impairment_parameter_match`)
+3. **Active compliance signals** (added with the DMR archive
+   integration). Two chips:
+   - Currently exceeding a permit limit (`tag_recent_exceedance`)
+   - Exceeding our chemistry parameter
+     (`tag_exceeds_treatable_parameter`)
+
+All three groups use the same AND-semantics within group and AND
+across groups. None checked in a group = no filter from that
+group (additive opt-in, not restrictive). The shared `tagTrue()`
+helper accepts both real booleans (seed data) and CSV
+`"True"`/`"False"` strings, so the chips work regardless of source.
+
+The detail panel gains two new blocks rendered conditionally:
+- `renderPreViolationBlock(r)` — shows treatable permitted
+  parameters, matching impairment parameters (bolded if present),
+  and downstream impairment causes. Disappears for older CSVs
+  without these columns.
+- `renderActiveComplianceBlock(r)` — shows worst-single-row
+  exceedance (parameter + %), count of exceedance rows, and the
+  set of treatable classes exceeded. Bolded + red header when
+  `tag_exceeds_treatable_parameter` is True (the strongest
+  composite signal). Disappears for rows with no exceedance data.
+
+**INT32_MAX special-case render.** When `top_exceedance_pct >=
+99,999`, the block renders "≥ 99,999% (limit may be 0)" rather
+than the bare number. EPA reports the INT32_MAX sentinel
+(2,147,483,647) when a permit's `LIMIT_VALUE` is 0 — the +15
+severity tier still applies correctly, but the raw value would
+look broken to a sales reader. See parent project's MEMORY.md
+Trap 13 for the empirical source.
+
 ### 5a. Run Health tab (added 2026-05-26)
 
 The viewer has two tabs now: **Inventory** (the original table view) and

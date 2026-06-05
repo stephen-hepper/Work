@@ -31,7 +31,10 @@ Done items kept here for context; remove once they've shipped a release.
 - [ ] **D. Externalize rule weights.** Replace inline literals (`return 40, ...`)
   with a `WEIGHTS` dict at the top of `scoring.py`, or load from
   `weights.yaml`. Sales feedback like "weight SNC less, TT more" becomes a
-  config change instead of a code review.
+  config change instead of a code review. **Urgency raised 2026-06:** with
+  10 facility rules + 5 event rules now in play (up from 6+5), the
+  config-vs-code-review delta is bigger. Worth doing before the next
+  weight-tuning conversation with sales.
 
 - [ ] **E. Expose dropped facility metadata.** Add `population_served`,
   `system_type`, `owner_type`, `primary_source` columns from the SDWA response
@@ -51,15 +54,32 @@ Done items kept here for context; remove once they've shipped a release.
   Most extensible representation — the total becomes a derived view, and
   sales can pivot/sort on any individual component.
 
+## External data integrations
+
+Tracked separately in `EXTERNAL_DATA_STATUS.md`. As of 2026-06:
+
+- [x] **Tier-1 #1: NPDES Permit Limits** — pre-violation signal, shipped.
+- [x] **Tier-1 #2: ATTAINS-NPDES catchment** — pre-violation signal, shipped.
+- [x] **Tier-1 #3: NPDES DMR archive** — active-compliance signal, shipped.
+- [ ] **Tier-1 #4: Sewer Overflow / CSO / SSO events** — daily refresh,
+  POTW lead signal. Not started.
+- [ ] **Tier-1 #5: TRI Surface Water Releases** — annual chemical-specific
+  pounds-per-year. Not started.
+- [ ] **Tier-2 #6: UCMR5 PFAS Occurrence** — needs sales confirmation that
+  ChemTreat sells PFAS treatment.
+- [ ] **Tier-2 #7: Industrial Stormwater MSGP AIM events** — niche but
+  high-confidence.
+
 ## Other open follow-ups
 
 - [ ] **Retry-on-empty for state-wide queries.** LA/OH CWA queries sometimes
   return empty without a QID under rapid-fire pacing. The DFR-retry pattern
   in `fetch_sdwa_violation_events` could be lifted to `_qid_workflow`.
 
-- [ ] **Tune `EVENT_DRILLDOWN_MIN_SCORE`.** Currently 50 with no CWA leads
-  ever reaching it (top CWA was 47 in the TX run). Either drop the threshold
-  for CWA or split per-program thresholds.
+- [x] **Tune `EVENT_DRILLDOWN_MIN_SCORE` (resolved 2026-06-02).** The
+  pre-violation + active-compliance integrations lifted top CWA scores
+  from 47 → 187. ~10K leads now clear the ≥50 threshold nationwide. The
+  threshold is correctly tuned; no change needed. Closed.
 
 - [ ] **`sdwa_codes.py` may be redundant** for the DFR drill-down path now
   that violations come with text fields (`FederalRule`, `ContaminantName`,
@@ -68,3 +88,8 @@ Done items kept here for context; remove once they've shipped a release.
 
 - [ ] **Email digest of `new_today.csv`.** Sales ops asked. ~30 lines via
   SMTP. Skipped while we were chasing data-accuracy bugs.
+
+- [ ] **Re-tier viewer color thresholds.** The pre-2026-06 outlier band was
+  ≥110. The 2026-06-02 run had 220 leads ≥130, 998 ≥100, and a top of 187.
+  Consider bumping the outlier threshold to ≥150 so the star badge stays
+  rare and meaningful.

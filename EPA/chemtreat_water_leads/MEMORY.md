@@ -202,6 +202,60 @@ or `bulk_loader.py`) knows to second-pass.
 that catches the survivors of the first pass. End-of-run summary
 warns if final miss rate exceeds 5%.
 
+### Trap 11: HTTP 429 fine-comb throttle (added 2026-06-02)
+
+Different from the bot-block in Trap 7 and the DFR thin-response in
+Trap 8: when EPA's effluent_chart / DFR endpoints are throttled by
+IP rate-limit, they return plain HTTP 429 (not a 200 with a
+sentinel). The 2026-06-02 nationwide run wedged for 2 hours because
+every fine-comb call after a ~20-call burst kept getting 429'd; the
+loops would catch the exception per-permit and grind onward at
+1–2 s/call producing zero events.
+
+`pipeline.py` now tracks consecutive 429s in `_drill_cwa` /
+`_drill_sdwa` via the `_is_http_429` helper. After
+`THROTTLE_STREAK_THRESHOLD = 20` consecutive 429s, the loop breaks
+and `_short_circuit_remaining` marks the unattempted candidates as
+`lookup_failed` so the Run Health card surfaces them for a later
+re-run. Streak resets on any non-429 outcome (success OR a
+non-throttle error); pinned by
+`tests/test_fine_comb_throttle_short_circuit.py`.
+
+This saved ~1 h 50 m on the second 2026-06-02 run when EPA was
+still throttling — completed in 5 min instead of grinding for hours.
+
+### Trap 12: EPA's `EXCEEDENCE_PCT` typo (added 2026-06-02)
+
+The DMR archive's per-row exceedance percentage column is spelled
+**`EXCEEDENCE_PCT`** — note the misspelling, "EXCEEDENCE" not
+"EXCEEDANCE". EPA's own documentation says "EXCEEDANCE_PCT"; verify
+against a fresh download before any "correction" of the spelling
+in our code, including in `tests/_fixtures.py` (where the
+`DMR_HEADER` constant carries the typo) and in
+`bulk_loader.stream_dmr_exceedances`.
+
+A "fix" of either side without the other would silently produce
+zero exceedances on every run. The streamer's docstring and the
+fixture comment both pin the spelling explicitly so a refactor has
+to confront the typo.
+
+### Trap 13: EPA's INT32_MAX sentinel for zero-limit parameters
+
+Some NPDES permits set a parameter's limit to 0 (i.e. "zero
+discharge allowed"). When a facility reports any positive value
+under such a limit, EPA's DMR exceedance % is mathematically
+infinite — and the bulk file encodes that as
+`2,147,483,647` (= INT32_MAX). Verified against permit AKG528836
+("Seafood Processing Waste") in the live FY2026 file.
+
+The +15 severity tier still applies correctly (>1000% over), but
+the raw value renders as a meaningless 10-digit number in the CSV
+and viewer. `bulk_loader._clamp_pct_for_display` clamps
+`top_exceedance_pct` at 99,999% for storage / display. The
+per-event payload keeps the raw float — downstream audit can still
+see the sentinel. Pinned by
+`tests/test_dmr_exceedance_stream.py::test_int32_max_sentinel_clamped_for_display`.
+
 ---
 
 ## Sales relevance details (don't forget these)
@@ -227,13 +281,32 @@ Two rule families. Facility rules run on every lead (cheap, summary
 fields from `get_qid`). Event rules run after the high-score drill-down
 and inspect the actual violation events.
 
-**Facility rules** (`RULES`):
+**Facility rules** (`RULES`) — 10 total, grouped by signal class:
+
+*Enforcement-status signals* — fire on actions EPA has already taken:
 - SNC flag: 40 (strongest single signal)
 - Quarters in non-compliance: 8 each, capped at 32
 - Formal enforcement action: 15
 - Major-permit facility: 10
 - Recent penalty: 5–8
 - Recent inspection: 5
+
+*Pre-violation signals* — fire on structural state regardless of
+current compliance. See EXTERNAL_DATA_STATUS.md "pre-violation"
+clarification for full framing:
+- Treatable permit parameter: 5/hit, cap 15 (rolled up from
+  `npdes_limits.zip`; classes = phosphorus, ammonia, TSS, BOD,
+  oil/grease, metals incl. Fe/Mn, cyanide, chlorine residual)
+- Discharges to 303(d)-impaired water: 10, or 15 if effluent
+  parameter matches impairment cause (`npdes_attains_downloads.zip`)
+
+*Active-compliance signals* — fire on actual exceedances in the
+loaded fiscal-year DMR archive:
+- Recent DMR exceedance: tiered 5/8/10/12/15 by severity
+  (50%/100%/200%/1000% thresholds; `npdes_dmrs_fy<YEAR>.zip`)
+- Exceeds permitted, treatable parameter (composite): 15 — the
+  strongest single signal in the system, fires when the facility
+  is permitted on AND currently exceeding the same treatable class
 
 **Event rules** (`EVENT_RULES`, applied to facilities scoring ≥50
 after they've been drilled):
@@ -248,11 +321,13 @@ after they've been drilled):
 
 **No `MAX_SCORE` cap as of 2026-05-21.** The previous 100-point ceiling
 collapsed the top of the distribution (99 facilities tied at 87 in a TX
-run). Removing it lets genuine outliers stand out — top score on a
-fresh TX+VA+LA run was 142, with only 5 leads above 100. Theoretical
-max ≈ 180 if every facility + event rule fires. Viewer's color tiers
-(`scoreClass` in `index.html`) reflect this: ≥110 = outlier (star
-badge), ≥80 = red, ≥60 = orange, ≥40 = yellow.
+run). Removing it lets genuine outliers stand out — after the four
+new pre-violation + active-compliance rules shipped, the 2026-06-02
+nationwide run topped out at 187 with 220 leads ≥130. Theoretical max
+~240+ if every rule fires. Viewer's color tiers (`scoreClass` in
+`index.html`) reflect the pre-2026-06 distribution: ≥110 = outlier
+(star badge), ≥80 = red, ≥60 = orange, ≥40 = yellow. Re-tier the
+band thresholds if the distribution shifts further.
 
 **Don't replace these with ML.** Sales needs to be able to look at a row
 and say "this is a 142 because…." Interpretability matters more than
@@ -349,18 +424,33 @@ which produces meaningless results.
 
 ## Bulk loader: the nationwide path
 
-`bulk_loader.py` downloads three EPA files (cached locally for 7 days
+`bulk_loader.py` downloads five EPA files (cached locally for 7 days
 since that matches EPA's weekly refresh cadence):
 
-| File | Size | Contains |
-|---|---|---|
-| `echo_exporter.zip` | ~250 MB | 1.5M facilities × 130+ columns |
-| `npdes_downloads.zip` | ~80 MB | Individual NPDES violations |
-| `SDWA_latest_downloads.zip` | ~40 MB | Individual SDWA violations |
+| File | Compressed | Unzipped | Contains |
+|---|---|---|---|
+| `echo_exporter.zip` | ~423 MB | ~250 MB CSV (gzip-compressed in-zip) | 1.5M facilities × 130+ columns |
+| `npdes_downloads.zip` | ~327 MB | varies | NPDES_SE/PS/CS violation events (codes + dates; no per-DMR detail) |
+| `SDWA_latest_downloads.zip` | ~499 MB | varies | Individual SDWA violations |
+| `npdes_limits.zip` | ~490 MB | ~7.2 GB | NPDES permit limits — what each permit *allows* (pre-violation signal) |
+| `npdes_attains_downloads.zip` | ~99 MB | ~570 MB | NPDES↔ATTAINS 303(d) catchment linkage (pre-violation signal) |
+| `npdes_dmrs_fy<YEAR>.zip` | ~344 MB | ~5 GB | Per-DMR submissions with EXCEEDENCE_PCT (active-compliance signal) |
+
+Total compressed: ~2.2 GB. Total unzipped (only read in streams):
+~13 GB. None of the unzipped data ever lands in memory whole — every
+streamer uses `csv.DictReader` over a `zipfile.open()` handle.
 
 URLs hardcoded at top of `bulk_loader.py`. **Verify against
 <https://echo.epa.gov/tools/data-downloads> if a download fails** — EPA
 occasionally renames these.
+
+**Cache-filename gotcha (2026-06-02).** `_download_cached(url, dir,
+name)` saves as `<name>.zip` — the `name` arg must match the
+`BULK_URLS` dict key exactly. Manual downloads for verification
+purposes should use the same name, or you'll get a cache miss on
+the next run (which is harmless but wasteful). The DMR archive
+specifically: BULK_URLS key is `dmr_fy2026` → cache file is
+`dmr_fy2026.zip`, NOT `npdes_dmr_fy2026.zip`.
 
 The bulk path uses different column names than the API (UNDERSCORE_CASE
 instead of CamelCase). The `_bulk_to_api_shape()` function maps them so

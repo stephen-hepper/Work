@@ -28,19 +28,23 @@ deletes rows, so paths layer additively.
 
 ---
 
-## What `bulk_loader` does internally — one command, five stages
+## What `bulk_loader` does internally — one command, eight stages
 
 ```mermaid
 flowchart TD
-    A[1. Scan ECHO Exporter<br/>→ facility inventory] --> B[2. Stream NPDES + SDWA event zips<br/>→ join to leads]
-    B --> C[3. Re-score with events<br/>compute outreach_posture + tags]
-    C --> D[4. API fine-comb<br/>on high-value / newly-discovered / score-jumped leads]
-    D --> E[5. Upsert SQLite<br/>→ dump CSVs]
+    A[1. Scan ECHO Exporter<br/>→ facility inventory + initial score] --> B[2. Stream NPDES permit limits<br/>→ permit_has_* signals on CWA leads]
+    B --> C[3. Stream NPDES↔ATTAINS linkage<br/>→ impaired-water signals on all leads]
+    C --> D[4. Stream DMR archive<br/>→ exceedance signals + per-DMR events on CWA leads]
+    D --> E[5. Re-score with new signals<br/>BEFORE drill-down candidate selection]
+    E --> F[6. Stream NPDES + SDWA event zips<br/>→ join to leads]
+    F --> G[7. API fine-comb<br/>on high-value / newly-discovered / score-jumped leads<br/>auto short-circuits on 20-streak HTTP 429]
+    G --> H[8. Upsert SQLite<br/>→ dump CSVs to per-run folder]
 ```
 
-`bulk_loader` (no flags) runs **all five stages in one process**, ~15-30 min
-total. You don't need to issue each stage separately. `--no-events` stops
-after stage 1.
+`bulk_loader` (no flags) runs **all eight stages in one process**, ~10-30 min
+total (warm cache). You don't need to issue each stage separately. `--no-events`
+stops after stage 1 — every download and signal-stream stage past it is gated
+on `include_events` and pinned by `tests/test_no_events_flag.py`.
 
 ---
 
@@ -89,15 +93,25 @@ genuinely fresh rows since the previous run.
 
 ## Cost of each path
 
-|                           | Time             | EPA load                              |
-|---                        |---               |---                                    |
-| `bulk_loader --no-events` | 5–10 min         | 1 download (~250 MB), zero API calls  |
-| `bulk_loader`             | 15–30 min        | 3 downloads (~830 MB) + auto fine-comb |
-| `pipeline --states X`     | 5–20 min × state | hundreds of API calls per state       |
+|                           | Time             | EPA load                                            |
+|---                        |---               |---                                                  |
+| `bulk_loader --no-events` | 5–10 min         | 1 download (~423 MB), zero API calls                |
+| `bulk_loader`             | 10–30 min        | 6 downloads (~2.2 GB compressed) + auto fine-comb   |
+| `pipeline --states X`     | 5–20 min × state | hundreds of API calls per state                     |
 
 After 7 days, `bulk_loader` re-downloads (cache invalidates to match
-EPA's weekly refresh). Inside that window, runs are ~3-10 min because
-the zips are cached.
+EPA's weekly refresh). Inside that window, runs are ~5-15 min because
+the zips are cached — the DMR archive stream-filter (~30 min on first
+encounter against a 5 GB CSV) is the dominant cost when only a small
+permit set matches.
+
+**Fine-comb 429 handling.** EPA's effluent_chart / DFR endpoints
+sometimes throttle our IP with persistent HTTP 429s. `_drill_cwa` /
+`_drill_sdwa` track consecutive 429s and bail out at
+`THROTTLE_STREAK_THRESHOLD = 20` to avoid grinding for hours at
+1–2 s/call. Bailed candidates are marked `lookup_failed` in
+`run_health.json` and surface in the viewer's Run Health card with
+a copy-paste re-run command.
 
 ---
 
