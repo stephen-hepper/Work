@@ -48,6 +48,67 @@ EVENT_DRILLDOWN_MIN_SCORE = 50
 LOOKBACK_DAYS = 365
 
 
+# ---------------------------------------------------- DRILL-DOWN BACKOFF
+#
+# Per-row drill-down state (recorded on `facilities` via the columns
+# `last_drilldown_attempt_at`, `last_drilldown_outcome`,
+# `drilldown_failure_streak`, `next_drilldown_eligible_at`) drives the
+# hands-off rerun loop. The Snowflake eligibility view filters
+# `WHERE next_drilldown_eligible_at <= CURRENT_TIMESTAMP()`; the pipeline
+# writes that timestamp at the end of each drill attempt based on this
+# policy.
+#
+# Tuning these values is a policy decision — see
+# SNOWFLAKE_DESIGN.md for the trade-off. The current values balance
+# freshness against EPA API quota:
+#   * with_events: 7d (matches EPA's weekly bulk refresh — drilling more
+#     often returns the same data)
+#   * no_data: 30d (EPA confirmed no events on file; burning quota to
+#     re-confirm doesn't earn anything until something *new* lands)
+#   * lookup_failed: 6h (EPA throttle typically clears within an hour;
+#     6h gives margin and dovetails with daily rerun cadence)
+DRILLDOWN_BACKOFF: dict[str, timedelta] = {
+    "with_events":   timedelta(days=7),
+    "no_data":       timedelta(days=30),
+    "lookup_failed": timedelta(hours=6),
+}
+
+
+def _record_drilldown_outcome(lead: dict, outcome: str,
+                               prior_streaks: dict[tuple[str, str], int],
+                               now: datetime) -> None:
+    """Annotate `lead` with the per-row drill-down state for this attempt.
+
+    Sets four columns the snapshot upsert reads via `.get()`:
+    `last_drilldown_attempt_at`, `last_drilldown_outcome`,
+    `drilldown_failure_streak`, `next_drilldown_eligible_at`. The
+    fifth column (`last_drilldown_run_id`) is backfilled by
+    `snapshot.diff_and_upsert_facilities` from the run_id it already
+    has — keeps record_run atomic with the upsert block (no early
+    DB open required just to mint a run_id for drilling).
+
+    Called once per drill attempt by `_drill_cwa` / `_drill_sdwa`;
+    a later attempt in the same run (e.g. the second pass after EPA
+    throttle clears) cleanly overwrites the earlier fields, mirroring
+    the existing `failed_keys` discard-on-success semantics.
+
+    Streak math:
+      * 'lookup_failed' -> prior_streak + 1
+      * 'with_events' / 'no_data' -> 0  (reset on any non-failure)
+    """
+    if outcome not in DRILLDOWN_BACKOFF:
+        raise ValueError(f"unknown drill-down outcome: {outcome!r}")
+    key = (lead.get("registry_id"), lead.get("program"))
+    prior = prior_streaks.get(key, 0)
+    streak = prior + 1 if outcome == "lookup_failed" else 0
+    lead["last_drilldown_attempt_at"] = now.isoformat(timespec="seconds")
+    lead["last_drilldown_outcome"] = outcome
+    lead["drilldown_failure_streak"] = streak
+    lead["next_drilldown_eligible_at"] = (
+        (now + DRILLDOWN_BACKOFF[outcome]).isoformat(timespec="seconds")
+    )
+
+
 # ---------------------------------------------------------- LAG WARNINGS
 #
 # EPA's water data is NOT real-time. The two programs lag for different
@@ -204,14 +265,25 @@ def _is_http_429(exc: BaseException) -> bool:
 def _short_circuit_remaining(remaining_leads,
                              failed_out: set | None,
                              missed_out: list[dict] | None,
-                             reason: str) -> int:
+                             reason: str,
+                             prior_streaks: dict[tuple[str, str], int] | None = None,
+                             now: datetime | None = None) -> int:
     """Mark every still-unattempted candidate as failed and return the
     count. Called when the 429 streak crosses
     THROTTLE_STREAK_THRESHOLD. The viewer's run-health card surfaces
     these as 'lookup failed — re-run later' rather than 'no records
     on file', which is the truthful state: we never tried them
-    because EPA was throttling us."""
+    because EPA was throttling us.
+
+    When `prior_streaks` is supplied, each short-circuited lead is
+    also marked with `last_drilldown_outcome='lookup_failed'` so the
+    new drill-down-state columns reflect "we never tried them this
+    run" — the Snowflake eligibility view will queue them for re-run
+    after `DRILLDOWN_BACKOFF['lookup_failed']`."""
+    if prior_streaks is None:
+        prior_streaks = {}
     skipped = 0
+    ts = now or datetime.utcnow()
     for lead in remaining_leads:
         # Same per-program eligibility checks the drill loops use — a
         # CWA-only loop shouldn't penalize SDWA leads (and vice versa)
@@ -221,6 +293,7 @@ def _short_circuit_remaining(remaining_leads,
             failed_out.add(key)
         if missed_out is not None:
             missed_out.append(lead)
+        _record_drilldown_outcome(lead, "lookup_failed", prior_streaks, ts)
         skipped += 1
     if skipped:
         log.warning("%s — %d candidate(s) marked as lookup_failed for re-run",
@@ -232,7 +305,8 @@ def _drill_cwa(leads: list[dict], start: str, end: str,
                events_out: list[dict],
                inter_call_sleep: float,
                missed_out: list[dict] | None,
-               failed_out: set | None = None) -> int:
+               failed_out: set | None = None,
+               prior_streaks: dict[tuple[str, str], int] | None = None) -> int:
     """Drill CWA effluent exceedances for each lead in `leads`.
 
     Appends new events to `events_out` (shared with the SDWA path).
@@ -258,7 +332,15 @@ def _drill_cwa(leads: list[dict], start: str, end: str,
     every remaining eligible candidate is marked as failed via
     `_short_circuit_remaining`. This stops a wedged fine-comb from
     burning hours of wall-clock for zero events.
+
+    `prior_streaks`, if supplied, also enables per-row drill-down
+    state writes to each touched lead (via `_record_drilldown_outcome`).
+    Callers that want the Snowflake-side rerun loop to work should
+    always pass it; callers that don't (existing tests) get a
+    no-op pass-through.
     """
+    if prior_streaks is None:
+        prior_streaks = {}
     drilled = 0
     streak = 0
     for i, lead in enumerate(leads):
@@ -280,10 +362,22 @@ def _drill_cwa(leads: list[dict], start: str, end: str,
             errored = True
             log.warning("CWA event fetch failed for %s: %s", lead["permit_id"], e)
             streak = streak + 1 if _is_http_429(e) else 0
+        # Outcome: 'with_events' if any landed, 'lookup_failed' on raise,
+        # else 'no_data' (clean empty). Record before missed/failed list
+        # mutation so the lead's outcome is the FINAL one for this pass.
         if len(events_out) > before:
+            outcome = "with_events"
             drilled += 1
-        elif missed_out is not None:
-            missed_out.append(lead)
+        elif errored:
+            outcome = "lookup_failed"
+            if missed_out is not None:
+                missed_out.append(lead)
+        else:
+            outcome = "no_data"
+            if missed_out is not None:
+                missed_out.append(lead)
+        _record_drilldown_outcome(lead, outcome, prior_streaks,
+                                   datetime.utcnow())
         if failed_out is not None:
             key = (lead["registry_id"], lead["program"])
             failed_out.add(key) if errored else failed_out.discard(key)
@@ -293,7 +387,8 @@ def _drill_cwa(leads: list[dict], start: str, end: str,
                  if L["program"] == "CWA" and L.get("permit_id")),
                 failed_out, missed_out,
                 f"CWA fine-comb: {streak} consecutive HTTP 429s from EPA — "
-                f"aborting remaining drills"
+                f"aborting remaining drills",
+                prior_streaks=prior_streaks,
             )
             break
         time.sleep(inter_call_sleep)
@@ -303,7 +398,8 @@ def _drill_cwa(leads: list[dict], start: str, end: str,
 def _drill_sdwa(leads: list[dict], events_out: list[dict],
                 inter_call_sleep: float,
                 missed_out: list[dict] | None,
-                failed_out: set | None = None) -> int:
+                failed_out: set | None = None,
+                prior_streaks: dict[tuple[str, str], int] | None = None) -> int:
     """Same pattern for SDWA leads via the DFR endpoint.
 
     `failed_out` semantics match `_drill_cwa`: it records leads whose drill
@@ -312,8 +408,13 @@ def _drill_sdwa(leads: list[dict], events_out: list[dict],
     swallows that into a `[]` return, so here too only a raised exception
     (connection drop / read timeout) marks a lead as failed.
 
+    `prior_streaks` semantics match `_drill_cwa` — enables per-row
+    drill-down state writes when supplied.
+
     Same THROTTLE_STREAK_THRESHOLD short-circuit as `_drill_cwa`.
     """
+    if prior_streaks is None:
+        prior_streaks = {}
     drilled = 0
     streak = 0
     for i, lead in enumerate(leads):
@@ -333,9 +434,18 @@ def _drill_sdwa(leads: list[dict], events_out: list[dict],
                         lead["registry_id"], e)
             streak = streak + 1 if _is_http_429(e) else 0
         if len(events_out) > before:
+            outcome = "with_events"
             drilled += 1
-        elif missed_out is not None:
-            missed_out.append(lead)
+        elif errored:
+            outcome = "lookup_failed"
+            if missed_out is not None:
+                missed_out.append(lead)
+        else:
+            outcome = "no_data"
+            if missed_out is not None:
+                missed_out.append(lead)
+        _record_drilldown_outcome(lead, outcome, prior_streaks,
+                                   datetime.utcnow())
         if failed_out is not None:
             key = (lead["registry_id"], lead["program"])
             failed_out.add(key) if errored else failed_out.discard(key)
@@ -345,7 +455,8 @@ def _drill_sdwa(leads: list[dict], events_out: list[dict],
                  if L["program"] == "SDWA" and L.get("registry_id")),
                 failed_out, missed_out,
                 f"SDWA fine-comb: {streak} consecutive HTTP 429s from EPA — "
-                f"aborting remaining drills"
+                f"aborting remaining drills",
+                prior_streaks=prior_streaks,
             )
             break
         time.sleep(inter_call_sleep)
@@ -470,11 +581,18 @@ def _run_inner(states: list[str], out_dir: Path, db_path: Path,
     # both passes; a later success/clean-empty clears an earlier failure.
     failed_keys: set = set()
 
+    # Per-row drill-down state — loaded once before the loops so each
+    # 'lookup_failed' outcome increments the right base streak. Feeds
+    # _record_drilldown_outcome inside _drill_cwa / _drill_sdwa.
+    with snapshot.open_db(db_path) as conn:
+        prior_streaks = snapshot.load_prior_drilldown_state(conn)
+
     # 2a. CWA effluent exceedances (per-permit, fast endpoint)
     cwa_missed: list[dict] = []   # leads we couldn't drill — second-pass candidates
     cwa_drilled = _drill_cwa(high_value, start, end, events,
                              inter_call_sleep=0.3, missed_out=cwa_missed,
-                             failed_out=failed_keys)
+                             failed_out=failed_keys,
+                             prior_streaks=prior_streaks)
     log.info("Drilled %d CWA permits (%d missed; will retry)",
              cwa_drilled, len(cwa_missed))
 
@@ -485,7 +603,8 @@ def _run_inner(states: list[str], out_dir: Path, db_path: Path,
     sdwa_missed: list[dict] = []
     sdwa_drilled = _drill_sdwa(high_value, events,
                                inter_call_sleep=1.0, missed_out=sdwa_missed,
-                               failed_out=failed_keys)
+                               failed_out=failed_keys,
+                               prior_streaks=prior_streaks)
     log.info("Drilled %d SDWA systems (%d missed; will retry)",
              sdwa_drilled, len(sdwa_missed))
 
@@ -503,13 +622,15 @@ def _run_inner(states: list[str], out_dir: Path, db_path: Path,
         if cwa_missed:
             cwa_recovered = _drill_cwa(cwa_missed, start, end, events,
                                        inter_call_sleep=1.0, missed_out=None,
-                                       failed_out=failed_keys)
+                                       failed_out=failed_keys,
+                                       prior_streaks=prior_streaks)
             log.info("Second-pass CWA recovered: %d of %d",
                      cwa_recovered, len(cwa_missed))
         if sdwa_missed:
             sdwa_recovered = _drill_sdwa(sdwa_missed, events,
                                          inter_call_sleep=2.0, missed_out=None,
-                                         failed_out=failed_keys)
+                                         failed_out=failed_keys,
+                                         prior_streaks=prior_streaks)
             log.info("Second-pass SDWA recovered: %d of %d",
                      sdwa_recovered, len(sdwa_missed))
 

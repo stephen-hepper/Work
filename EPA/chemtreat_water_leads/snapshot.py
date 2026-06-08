@@ -152,6 +152,36 @@ FAC_COLUMNS: dict[str, str] = {
     "tag_impairment_parameter_match": "INTEGER",
     "tag_recent_exceedance":      "INTEGER",
     "tag_exceeds_treatable_parameter": "INTEGER",
+    # Drill-down state — per-row operational columns that drive
+    # hands-off rerun decisioning. Pipeline writes these from
+    # `_drill_cwa` / `_drill_sdwa` via `_record_drilldown_outcome`.
+    # The Snowflake eligibility view filters on
+    # `next_drilldown_eligible_at`; the pipeline reads
+    # `drilldown_failure_streak` at run start for backoff math.
+    # See chemtreat_water_leads/SNOWFLAKE_DESIGN.md for the cross-system
+    # contract.
+    #   * last_drilldown_attempt_at: ISO timestamp of last drill attempt
+    #     for this (registry_id, program). NULL = never attempted.
+    #   * last_drilldown_outcome: 'with_events' | 'no_data' |
+    #     'lookup_failed'. NULL = never attempted. Matches the
+    #     _health.summarize_drilldown vocabulary so the JSON view and
+    #     DB view agree on terms.
+    #   * last_drilldown_run_id: FK to runs.run_id. Joins the per-row
+    #     outcome back to the run that produced it for audit /
+    #     SLA queries.
+    #   * drilldown_failure_streak: count of consecutive 'lookup_failed'
+    #     outcomes; resets to 0 on 'with_events' or 'no_data'. Drives
+    #     give-up logic ("escalate after N straight failures").
+    #   * next_drilldown_eligible_at: ISO timestamp this row becomes
+    #     eligible for re-drill. Computed as
+    #     `last_drilldown_attempt_at + DRILLDOWN_BACKOFF[outcome]`
+    #     (pipeline.py). NULL = never attempted; eligibility view
+    #     treats NULL as "eligible whenever score warrants."
+    "last_drilldown_attempt_at":   "TEXT",
+    "last_drilldown_outcome":      "TEXT",
+    "last_drilldown_run_id":       "INTEGER",
+    "drilldown_failure_streak":    "INTEGER",
+    "next_drilldown_eligible_at":  "TEXT",
     # Legacy flag kept for backwards-compat with old DBs that only had
     # this column. Always equals tag_active_snc going forward; nothing
     # reads it today, but dropping it would break legacy diffs.
@@ -417,6 +447,13 @@ def diff_and_upsert_facilities(conn: sqlite3.Connection,
             if snc_flag_now == "Y" and not prior_snc:
                 newly_snc.append(f)
 
+        # Backfill last_drilldown_run_id from this run's id when the
+        # lead carries a fresh drill-down outcome but no explicit
+        # run_id (the drill helpers omit it so record_run can stay
+        # atomic with this upsert block — see pipeline._record_drilldown_outcome).
+        if f.get("last_drilldown_outcome") and not f.get("last_drilldown_run_id"):
+            f["last_drilldown_run_id"] = run_id
+
         binds = []
         for col in FAC_COLUMNS:
             if col == "first_seen":
@@ -637,3 +674,31 @@ def violations_in_run(conn: sqlite3.Connection,
         "ORDER BY v.registry_id, v.period_end DESC",
         (run_id,),
     ))
+
+
+def load_prior_drilldown_state(
+    conn: sqlite3.Connection,
+) -> dict[tuple[str, str], int]:
+    """Snapshot prior drill-down failure streaks from the DB before a run.
+
+    Returns ``{(registry_id, program): drilldown_failure_streak}``. Used
+    by `pipeline._record_drilldown_outcome` so a fresh `lookup_failed`
+    can increment the right base, and a `with_events` / `no_data` can
+    reset cleanly. Rows with NULL streak (never drilled before) are
+    omitted; the caller treats absence as streak == 0.
+
+    Opens nothing — caller passes its own connection so this can fit
+    inside the run's main `with snapshot.open_db(...)` block OR a
+    pre-run helper context, mirroring the bulk_loader._load_prior_scores
+    pattern.
+    """
+    out: dict[tuple[str, str], int] = {}
+    for r in conn.execute(
+        "SELECT registry_id, program, drilldown_failure_streak "
+        "FROM facilities WHERE drilldown_failure_streak IS NOT NULL"
+    ):
+        if r["registry_id"]:
+            out[(r["registry_id"], r["program"])] = (
+                r["drilldown_failure_streak"] or 0
+            )
+    return out

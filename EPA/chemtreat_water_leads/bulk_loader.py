@@ -1280,12 +1280,16 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
                     states: list[str] | None, include_events: bool,
                     warning_collector: "_health.WarningCollector",
                     drilldown_stats: dict) -> None:
-    # 1. Snapshot prior scores before any upsert. Used by
-    # `_drilldown_candidates` to spot newly-discovered facilities and
-    # facilities whose score jumped — both qualify for the fine-comb
-    # drill-down even when below the absolute score threshold.
+    # 1. Snapshot prior scores + drill-down streaks before any upsert.
+    # `prior_scores` drives `_drilldown_candidates` (newly-discovered /
+    # score-jumped triggers); `prior_streaks` drives the streak math in
+    # `_record_drilldown_outcome` so a fresh 'lookup_failed' increments
+    # the right base.
     prior_scores = _load_prior_scores(db_path)
     log.info("Loaded %d prior facility scores for drill-down trigger", len(prior_scores))
+    with snapshot.open_db(db_path) as conn:
+        prior_streaks = snapshot.load_prior_drilldown_state(conn)
+    log.info("Loaded %d prior drill-down failure streaks", len(prior_streaks))
 
     # 2. Download (cached) ECHO Exporter
     exporter_zip = _download_cached(BULK_URLS["echo_exporter"],
@@ -1492,10 +1496,12 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
                      - timedelta(days=LOOKBACK_DAYS)).strftime("%m/%d/%Y")
             cwa_recovered = _drill_cwa(candidates, start, end, events,
                                        inter_call_sleep=1.0, missed_out=None,
-                                       failed_out=failed_keys)
+                                       failed_out=failed_keys,
+                                       prior_streaks=prior_streaks)
             sdwa_recovered = _drill_sdwa(candidates, events,
                                          inter_call_sleep=2.0, missed_out=None,
-                                         failed_out=failed_keys)
+                                         failed_out=failed_keys,
+                                         prior_streaks=prior_streaks)
             drilldown_stats["cwa_recovered"] = cwa_recovered
             drilldown_stats["sdwa_recovered"] = sdwa_recovered
             log.info("Fine-comb recovered events for %d CWA + %d SDWA leads",
