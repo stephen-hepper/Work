@@ -702,19 +702,65 @@ COLUMN` for any column not already present in the live DB.
 Idempotent on fresh and legacy DBs.
 
 Tables:
-- `facilities` PK `(registry_id, program)` — ~38 columns, every CSV
+- `facilities` PK `(registry_id, program)` — 63 columns, every CSV
   field + `first_seen`/`last_seen` bookkeeping + legacy `snc_flag`
   (retained for diff comparisons).
-- `violations` PK `violation_id` — ~29 columns, union of CWA-shaped
+- `violations` PK `violation_id` — 29 columns, union of CWA-shaped
   (parameter, limit/dmr values, exceedance_pct, npdes_id, stat_basis)
   and SDWA-shaped (violation_code, contaminant, rule_family, etc.).
-- `runs` — run history for auditing.
+- `runs` PK `run_id` (AUTOINCREMENT) — run history (run_at, notes) for
+  auditing. `record_run()` returns the new `run_id` (added 2026-06-08).
+- `run_facility_membership` PK `(run_id, registry_id, program)` —
+  added 2026-06-08. One row per (run, facility) the upsert touched.
+  Indexed on `(registry_id, program)` for the reverse lookup.
+- `run_violation_membership` PK `(run_id, violation_id)` — same shape
+  for events.
+
+**Per-row run membership (added 2026-06-08).** Both `diff_and_upsert_*`
+functions now take a required `run_id` parameter and `INSERT OR IGNORE`
+into the matching membership table inside the per-row loop. The
+`first_seen`/`last_seen` ISO timestamps stay (back-compat) — the
+membership tables are additive. The caller pattern is now:
+
+```python
+with snapshot.open_db(db_path) as conn:
+    run_id = snapshot.record_run(conn, notes=..., now=run_start_ts)
+    snapshot.diff_and_upsert_facilities(conn, leads, run_id, now=run_start_ts)
+    snapshot.diff_and_upsert_violations(conn, events, run_id, now=run_start_ts)
+```
+
+Both `pipeline._run_inner` and `bulk_loader._run_bulk_inner` follow it.
+`record_run` MUST come first so the FK in the membership tables
+resolves. Same transaction, so a mid-run failure rolls back the run
+row too.
+
+Query patterns this enables:
+```sql
+-- which runs touched a facility?
+SELECT run_id FROM run_facility_membership
+ WHERE registry_id = ? AND program = ? ORDER BY run_id;
+
+-- first run we ever saw it in
+SELECT MIN(run_id) FROM run_facility_membership
+ WHERE registry_id = ? AND program = ?;
+
+-- everything touched by run N (use the helpers)
+snapshot.facilities_in_run(conn, run_id)
+snapshot.violations_in_run(conn, run_id)
+```
+
+No backfill of past runs — the membership tables start empty on legacy
+DBs and the first run after the upgrade begins populating. Backfilling
+from `first_seen`/`last_seen` against `runs.run_at` is lossy (a row
+touched in 8 runs only has two timestamps), so we don't attempt it.
 
 **Behavioral note.** Violations without a `violation_id` are silently
 dropped (cannot dedupe across runs without an ID). This was true
 before the refactor too; flagged for visibility. If sales reports
 missing rows, the fix is to synthesize an ID upstream in the
-event-fetch step, not paper over it in the dump.
+event-fetch step, not paper over it in the dump. The membership
+insert is skipped on the same condition (no `violation_id`, no
+membership row), so the two tables stay consistent.
 
 **Concurrency.** Two runs against the same DB at the same time would
 interleave `last_seen` updates and corrupt the dump filter. Runs must

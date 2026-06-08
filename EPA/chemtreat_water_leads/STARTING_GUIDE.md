@@ -31,15 +31,45 @@ penalty") — there is no ML black box.
 | **MCL** | Maximum Contaminant Level | A health-based ceiling on a specific contaminant in drinking water (lead, nitrate, etc.). MCL violations are high-relevance SDWA signals. |
 | **TT** | Treatment Technique | A required treatment process for a drinking-water system (filtration, disinfection). TT violations mean the treatment is failing — the single highest-relevance category for ChemTreat. |
 | **ECHO** | Enforcement and Compliance History Online | EPA's public website at `echo.epa.gov`. Every facility row in the viewer has a link to its ECHO page for verification. |
+| **DFR** | Detailed Facility Report | A composite per-facility page on ECHO combining CWA + SDWA + FRS data. The viewer's "Open in EPA ECHO" link goes here. We also drill it programmatically for SDWA per-violation detail. |
+| **FRS** | Facility Registry Service | EPA's master facility ID system. `RegistryID` comes from here and links a single physical site across CWA and SDWA records. |
+| **ICIS-NPDES** | Integrated Compliance Information System / NPDES | EPA's internal database backing the CWA data. Backstage — the API hits it for you. |
+| **SDWIS-Fed** | Safe Drinking Water Information System / Federal | EPA's internal database backing SDWA data. Same story — backstage. |
+| **PWS** | Public Water System | The SDWA-regulated entity. Can be a city utility, a rural water authority, a school, or a mobile-home park with its own well. One PWS often serves multiple cities/counties. |
+| **TMDL** | Total Maximum Daily Load | The pollutant cap a state must write for an impaired waterbody. When a TMDL gets written, downstream NPDES permits typically tighten at next renewal — that's the "pre-violation" angle on `discharges_to_impaired`. |
+| **303(d)** | Section 303(d) of the Clean Water Act | Requires states to list impaired waterbodies. Our `discharges_to_impaired` flag fires when a facility's outfall sits upstream of one. |
+| **ATTAINS** | Assessment, TMDL Tracking, and Implementation System | EPA's database of state water-quality assessments and 303(d) lists. Source of the impaired-water linkage. |
+| **NAICS** | North American Industry Classification System | Industry codes. We filter on prefixes (`325` chemical mfg, `2211` power gen, etc.) so the inventory stays focused on ChemTreat-target industries. |
+| **SIC** | Standard Industrial Classification | NAICS predecessor; some EPA records still carry SIC codes alongside NAICS. |
+| **FY** | Fiscal Year | Federal FY runs Oct 1 – Sep 30. The DMR archive file is named by federal FY (`npdes_dmrs_fy2026.zip` covers Oct 2025–Sep 2026). |
 
 **Computer/technical terms:**
 
 | Acronym | Stands for | What it means here |
 |---|---|---|
 | **API** | Application Programming Interface | A way for our code to query EPA's live data directly. Slower than bulk downloads but produces richer per-event detail. |
+| **REST** | Representational State Transfer | The pattern EPA's API uses — HTTP requests that return JSON. The `echo_client.py` module is the REST client. |
 | **CSV** | Comma-Separated Values | A text file you can open in Excel. The viewer reads these to display the inventory. |
 | **JSON** | JavaScript Object Notation | A structured text file format. `run_health.json` is the only one you'll see. |
 | **DB** | Database | The `snapshot.sqlite` file that stores the running history of every facility we've ever seen. Don't delete it. |
+
+**Datasets queued for future integration** (you may see these in the Run Health tab or in `EXTERNAL_DATA_STATUS.md`):
+
+| Acronym | Stands for | What it means here |
+|---|---|---|
+| **CSO** | Combined Sewer Overflow | A sewer system that combines stormwater and sanitary; overflow events are queued for integration (Tier-1 #4), with the daily refresh cadence that would close our 30–90d lag. |
+| **SSO** | Sanitary Sewer Overflow | Same family as CSO, sanitary-only. |
+| **TRI** | Toxics Release Inventory | EPA's annual per-facility per-chemical pounds-released report. Queued (Tier-1 #5) for the chemical-specific surface-water release dimension. |
+| **UCMR5** | Unregulated Contaminant Monitoring Rule, round 5 | The current round of EPA's mandate that PWSes test for emerging contaminants. UCMR5 is the PFAS-monitoring round. Queued (Tier-2 #6) pending sales confirmation that ChemTreat sells PFAS chemistry. |
+| **PFAS** | Per- and Polyfluoroalkyl Substances | "Forever chemicals." UCMR5's headline target. |
+| **MSGP** | Multi-Sector General Permit | EPA's umbrella NPDES permit for industrial stormwater. Facilities under MSGP that trip thresholds get pushed into the AIM tier. |
+| **AIM** | Additional Implementation Measures | The MSGP escalation tier. A facility in AIM is forced into specific treatment actions — queued (Tier-2 #7) as a high-confidence signal. |
+| **WQX** | Water Quality Exchange | USGS/EPA ambient water-quality measurements (~430M records). Deferred — needs HUC-based spatial joining to be useful. |
+| **HUC** | Hydrologic Unit Code | USGS watershed identifiers used to spatially link facilities to water bodies. Needed for the deferred WQX integration. |
+| **USGS** | U.S. Geological Survey | Publishes WQX ambient data. |
+
+For the full data-source catalog (refresh cadence, reporting lag, what each source produces),
+see [`DATA_DESCRIPTION.md`](DATA_DESCRIPTION.md).
 
 Two ways to pull data:
 
