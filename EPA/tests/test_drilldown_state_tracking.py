@@ -28,7 +28,7 @@ from unittest.mock import patch
 
 import requests
 
-from chemtreat_water_leads import pipeline, snapshot
+from chemtreat_water_leads import bulk_loader, pipeline, snapshot
 
 
 FIXED_NOW = datetime(2026, 6, 8, 12, 0, 0)
@@ -219,6 +219,101 @@ class TestShortCircuitMarksLookupFailed(unittest.TestCase):
             with self.subTest(permit=lead["permit_id"]):
                 self.assertEqual(lead["last_drilldown_outcome"],
                                   "lookup_failed")
+
+
+# ---------------------- _drilldown_candidates eligibility gate -------
+
+def _make_lead(reg, score, posture="no_events"):
+    """Synthesize a bulk-shaped lead dict for candidate-selection tests."""
+    return {
+        "registry_id": reg,
+        "program": "CWA",
+        "permit_id": f"P-{reg}",
+        "outreach_posture": posture,
+        "lead_score": score,
+        "company": f"Co {reg}",
+    }
+
+
+class TestDrilldownCandidatesBackoffGate(unittest.TestCase):
+    """The eligibility gate is what makes the rerun loop self-throttling
+    on the local side (matching the Snowflake v_drilldown_eligible view).
+    A lead that just failed should NOT be re-attempted on the next bulk
+    run within its 6h backoff — re-attempting just re-trips EPA's throttle."""
+
+    def _candidates(self, leads, prior_eligibility, now_iso):
+        return bulk_loader._drilldown_candidates(
+            leads, prior_scores={}, prior_eligibility=prior_eligibility,
+            now_iso=now_iso,
+        )
+
+    def test_no_prior_eligibility_means_eligible(self):
+        """A lead that's never been drilled has no row in
+        prior_eligibility. It should pass the gate."""
+        leads = [_make_lead("R1", 75)]
+        cand = self._candidates(leads, {}, "2026-06-09T08:00:00")
+        self.assertEqual(len(cand), 1)
+
+    def test_elapsed_backoff_means_eligible(self):
+        """Eligible_at in the past → backoff elapsed → drill."""
+        leads = [_make_lead("R1", 75)]
+        prior = {("R1", "CWA"): "2026-06-08T02:00:00"}    # past
+        cand = self._candidates(leads, prior, "2026-06-09T08:00:00")
+        self.assertEqual(len(cand), 1)
+
+    def test_future_backoff_means_skipped(self):
+        """Eligible_at in the future → still in backoff → skip even
+        though the lead's score crosses EVENT_DRILLDOWN_MIN_SCORE."""
+        leads = [_make_lead("R1", 75)]
+        prior = {("R1", "CWA"): "2026-06-09T14:00:00"}    # future
+        cand = self._candidates(leads, prior, "2026-06-09T08:00:00")
+        self.assertEqual(len(cand), 0)
+
+    def test_mixed_set_filters_correctly(self):
+        """Three leads: one never-drilled, one elapsed, one in-backoff.
+        Only the first two should pass."""
+        leads = [
+            _make_lead("R1", 75),   # never drilled → eligible
+            _make_lead("R2", 75),   # elapsed → eligible
+            _make_lead("R3", 75),   # in backoff → skip
+        ]
+        prior = {
+            ("R2", "CWA"): "2026-06-08T02:00:00",
+            ("R3", "CWA"): "2026-06-09T14:00:00",
+        }
+        cand = self._candidates(leads, prior, "2026-06-09T08:00:00")
+        self.assertEqual({c["registry_id"] for c in cand}, {"R1", "R2"})
+
+    def test_backwards_compat_without_eligibility(self):
+        """If a caller omits prior_eligibility, behavior must match the
+        pre-2026-06-09 design (positive triggers only). Pinned so a
+        refactor can't accidentally start failing closed."""
+        leads = [_make_lead("R1", 75)]
+        # No prior_eligibility kwarg
+        cand = bulk_loader._drilldown_candidates(leads, prior_scores={})
+        self.assertEqual(len(cand), 1)
+
+
+class TestLoadPriorDrilldownEligibility(unittest.TestCase):
+    """Round-trip an eligibility timestamp through the DB."""
+
+    def test_roundtrip(self):
+        with snapshot.open_db(":memory:") as conn:
+            conn.execute(
+                "INSERT INTO facilities (registry_id, program, lead_score, "
+                "next_drilldown_eligible_at, first_seen, last_seen) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("R1", "CWA", 75, "2026-06-09T14:00:00",
+                 "2026-06-08T00:00:00", "2026-06-08T00:00:00"))
+            conn.execute(
+                "INSERT INTO facilities (registry_id, program, lead_score, "
+                "first_seen, last_seen) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("R2", "SDWA", 50, "2026-06-08T00:00:00",
+                 "2026-06-08T00:00:00"))
+            elig = snapshot.load_prior_drilldown_eligibility(conn)
+        self.assertEqual(elig, {("R1", "CWA"): "2026-06-09T14:00:00"})
+        self.assertNotIn(("R2", "SDWA"), elig)
 
 
 # ---------------------- snapshot.load_prior_drilldown_state ------------

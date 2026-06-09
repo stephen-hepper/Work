@@ -676,6 +676,37 @@ def violations_in_run(conn: sqlite3.Connection,
     ))
 
 
+def load_prior_drilldown_eligibility(
+    conn: sqlite3.Connection,
+) -> dict[tuple[str, str], str]:
+    """Snapshot per-row drill-down eligibility timestamps from the DB.
+
+    Returns ``{(registry_id, program): next_drilldown_eligible_at_iso}``
+    for rows where the column is populated. Used by
+    `bulk_loader._drilldown_candidates` to skip leads that drilled
+    recently and are still in their backoff window — closes the
+    rerun loop locally without waiting for the Snowflake migration.
+
+    Rows with NULL `next_drilldown_eligible_at` (never drilled) are
+    omitted; the caller treats absence as "eligible whenever the
+    score warrants" (same default the Snowflake eligibility view
+    uses).
+
+    Caller opens its own connection; mirrors `load_prior_drilldown_state`
+    so a runner can load both with one DB open.
+    """
+    out: dict[tuple[str, str], str] = {}
+    for r in conn.execute(
+        "SELECT registry_id, program, next_drilldown_eligible_at "
+        "FROM facilities WHERE next_drilldown_eligible_at IS NOT NULL"
+    ):
+        if r["registry_id"]:
+            out[(r["registry_id"], r["program"])] = (
+                r["next_drilldown_eligible_at"]
+            )
+    return out
+
+
 def load_prior_drilldown_state(
     conn: sqlite3.Connection,
 ) -> dict[tuple[str, str], int]:

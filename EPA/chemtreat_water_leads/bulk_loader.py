@@ -1210,11 +1210,13 @@ SECONDARY_DRILLDOWN_MIN_SCORE = 20
 
 
 def _drilldown_candidates(leads: list[dict],
-                          prior_scores: dict[tuple[str, str], int]
+                          prior_scores: dict[tuple[str, str], int],
+                          prior_eligibility: dict[tuple[str, str], str] | None = None,
+                          now_iso: str | None = None,
                           ) -> list[dict]:
     """Pick which leads deserve API fine-comb drill-down this run.
 
-    Three independent triggers — any one is sufficient:
+    Three independent positive triggers — any one is sufficient:
       1. `lead_score >= EVENT_DRILLDOWN_MIN_SCORE` — absolute threshold;
          high-value leads always get per-event detail.
       2. Newly-discovered (no prior DB row) AND
@@ -1225,10 +1227,29 @@ def _drilldown_candidates(leads: list[dict],
          `lead_score >= SECONDARY_DRILLDOWN_MIN_SCORE` — trajectory
          change worth investigating, same floor for the same reason.
 
-    Leads that already have per-event detail from the bulk feed
-    (`outreach_posture != "no_events"`) are excluded — the API drill
-    would be redundant.
+    Exclusions:
+      * Leads that already have per-event detail from the bulk feed
+        (`outreach_posture != "no_events"`) — the API drill would be
+        redundant.
+      * Leads still in their drill-down backoff window — i.e. whose
+        `next_drilldown_eligible_at` is in the future. When
+        `prior_eligibility` is supplied, this filter applies AFTER
+        the positive triggers and the bulk-events exclusion: a lead
+        that would otherwise be a candidate gets skipped because the
+        per-outcome backoff (`pipeline.DRILLDOWN_BACKOFF`) says we
+        drilled it recently and a retry would just re-trip the same
+        throttle. Without `prior_eligibility`, behavior matches the
+        pre-2026-06-09 design (no backoff filter).
+
+    `now_iso` lets callers pin the comparison clock — ISO strings
+    compare lexically when same-format, so this is exact. Defaults to
+    `datetime.utcnow().isoformat(timespec="seconds")`.
     """
+    if prior_eligibility is None:
+        prior_eligibility = {}
+    if now_iso is None:
+        now_iso = datetime.utcnow().isoformat(timespec="seconds")
+
     out: list[dict] = []
     for lead in leads:
         if lead["outreach_posture"] != "no_events":
@@ -1236,14 +1257,27 @@ def _drilldown_candidates(leads: list[dict],
         key = (lead["registry_id"], lead["program"])
         score = lead["lead_score"]
         prior = prior_scores.get(key)
+        # Positive trigger check first — same three rules as before.
+        is_candidate = False
         if score >= EVENT_DRILLDOWN_MIN_SCORE:
-            out.append(lead)
+            is_candidate = True
         elif score < SECONDARY_DRILLDOWN_MIN_SCORE:
             continue
         elif prior is None:
-            out.append(lead)
+            is_candidate = True
         elif score > prior + 10:
-            out.append(lead)
+            is_candidate = True
+        if not is_candidate:
+            continue
+        # Backoff gate. The lead would otherwise be a candidate, but
+        # if we drilled it recently and the per-outcome window hasn't
+        # elapsed, skip — re-drilling is just going to re-trip EPA's
+        # throttle (for 'lookup_failed') or re-confirm an unchanged
+        # 'no_data' answer.
+        eligible_at = prior_eligibility.get(key)
+        if eligible_at and eligible_at > now_iso:
+            continue
+        out.append(lead)
     return out
 
 
@@ -1289,7 +1323,10 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
     log.info("Loaded %d prior facility scores for drill-down trigger", len(prior_scores))
     with snapshot.open_db(db_path) as conn:
         prior_streaks = snapshot.load_prior_drilldown_state(conn)
-    log.info("Loaded %d prior drill-down failure streaks", len(prior_streaks))
+        prior_eligibility = snapshot.load_prior_drilldown_eligibility(conn)
+    log.info("Loaded %d prior drill-down failure streaks; "
+             "%d rows in backoff (eligibility-at populated)",
+             len(prior_streaks), len(prior_eligibility))
 
     # 2. Download (cached) ECHO Exporter
     exporter_zip = _download_cached(BULK_URLS["echo_exporter"],
@@ -1481,7 +1518,8 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
         # newly-discovered (no prior DB row) OR score jumped >10 since
         # prior run. Bulk-only leads that already have events from
         # this run are excluded by `_drilldown_candidates`.
-        candidates = _drilldown_candidates(leads, prior_scores)
+        candidates = _drilldown_candidates(leads, prior_scores,
+                                           prior_eligibility=prior_eligibility)
         drilldown_stats["candidates"] = len(candidates)
         # Leads whose fine-comb drill RAISED (vs. returned cleanly empty),
         # final-attempt outcome. Feeds the Run Health failed-vs-no-data split.
