@@ -497,6 +497,287 @@ After the cutover:
 
 ---
 
+# ▶ OPTIONAL — Raw EPA bulk-file staging
+
+> **This section is opt-in.** The rest of the doc above describes the
+> minimum viable Snowflake state (derived `facilities` / `violations` /
+> `runs` / membership tables only). Everything below describes an
+> *additional* layer: landing the raw EPA bulk-download files in
+> Snowflake as-is, alongside the derived layer. Skip this section
+> entirely if your use case is satisfied by the rolled-up signals the
+> scoring layer produces.
+
+## Why you might add it
+
+- **Audit / provenance.** "Which exact row in this week's `npdes_limits.csv`
+  caused `permit_has_phosphorus=1` on facility X?" Today the answer
+  requires re-downloading the zip and grepping; landed, it's a JOIN.
+- **Replay.** Re-score a 4-month-old snapshot against the current
+  scoring rules without re-downloading from EPA (which they may have
+  refreshed or renamed since). Today the bulk_loader cache holds only
+  the most recent 7-day window.
+- **Cross-team consumption.** Other teams / tools (compliance, finance,
+  product) can query the raw EPA data in SQL without standing up
+  their own ingestion of the same files.
+- **Permit-trajectory analytics.** Questions like "which facilities
+  had a permit tighten in the last year?" need the full `npdes_limits`
+  history, not just the current rolled-up `permit_has_*` flags.
+
+## Why you might skip it
+
+- **Storage cost.** ~13 GB unzipped per weekly snapshot. At 26 weeks
+  of history that's ~340 GB raw / ~80 GB compressed in Snowflake.
+  Low single-digit dollars per month at Snowflake's storage rates, but
+  non-zero.
+- **Loading time.** ~3–10 minutes per file, ~6 files per weekly run.
+  Adds ~30–60 min to the wall-clock for a full nationwide bulk run.
+- **ETL surface area.** Six more tables + a retention task to keep
+  current. Each EPA schema change becomes a small maintenance burden
+  on the raw side (the derived side is shielded by the bulk-loader
+  streamers).
+- **Sufficient-as-is.** For pure lead-generation, the derived layer
+  already exposes everything sales needs. Raw is for the analytics +
+  audit use cases above.
+
+---
+
+## Tables — direct port of the EPA bulk file shapes
+
+One Snowflake table per EPA bulk CSV. Column shape comes from the
+file's own header — defined via `INFER_SCHEMA` on first load (see
+loader pattern below), so we don't enumerate 130+ columns by hand.
+
+| EPA file → Snowflake table | Approx rows/snapshot | Source zip |
+|---|---|---|
+| `ECHO_EXPORTER.csv` → `raw_echo_exporter` | ~1.5M | `echo_exporter.zip` |
+| `NPDES_SE/PS/CS_VIOLATIONS.csv` → `raw_npdes_violations` | ~5M (3 files unioned at load) | `npdes_downloads.zip` |
+| `SDWA_VIOLATIONS_ENFORCEMENT.csv` → `raw_sdwa_violations` | ~5M | `SDWA_latest_downloads.zip` |
+| `NPDES_LIMITS.csv` → `raw_npdes_limits` | ~10M | `npdes_limits.zip` |
+| `NPDES_ATTAINS_AU_SUMMARIES.csv` → `raw_npdes_attains` | ~1M | `npdes_attains_downloads.zip` |
+| `NPDES_DMRS_FY2026.csv` → `raw_npdes_dmrs` (one table; partitioned by FY) | ~5–10M per FY | `npdes_dmrs_fy2026.zip` |
+
+Every raw table carries two bookkeeping columns appended at load time
+(not from EPA's header):
+
+| Column | Type | Purpose |
+|---|---|---|
+| `loaded_at` | `TIMESTAMP_NTZ` | When this row entered Snowflake. Drives the 26-week retention DELETE. |
+| `snapshot_tag` | `VARCHAR` | Caller-supplied label (`'2026-wk24'`, `'2026-06-08'`). Lets a query pin a specific weekly snapshot for replay without timestamp math. |
+
+## Loader pattern — direct PUT + COPY from the runner
+
+Runs at the bottom of `bulk_loader._run_bulk_inner`, immediately
+after each `_download_cached` call returns the local zip path. Add
+a new helper `chemtreat_water_leads/snowflake_raw_loader.py`:
+
+```python
+# chemtreat_water_leads/snowflake_raw_loader.py
+import io, zipfile
+from datetime import datetime
+from pathlib import Path
+import snowflake.connector
+
+# File-inside-zip name → target Snowflake table.
+RAW_FILE_TARGETS = {
+    "ECHO_EXPORTER.csv":              "raw_echo_exporter",
+    "NPDES_SE_VIOLATIONS.csv":        "raw_npdes_violations",
+    "NPDES_PS_VIOLATIONS.csv":        "raw_npdes_violations",
+    "NPDES_CS_VIOLATIONS.csv":        "raw_npdes_violations",
+    "SDWA_VIOLATIONS_ENFORCEMENT.csv": "raw_sdwa_violations",
+    "NPDES_LIMITS.csv":               "raw_npdes_limits",
+    "NPDES_ATTAINS_AU_SUMMARIES.csv": "raw_npdes_attains",
+    # DMR file is named with the FY: NPDES_DMRS_FY2026.csv etc.
+    # Handled separately so we capture the FY into snapshot_tag.
+}
+
+
+def load_zip_to_snowflake(zip_path: Path, snapshot_tag: str,
+                          conn: snowflake.connector.SnowflakeConnection) -> None:
+    """Extract each known CSV from the zip and PUT+COPY into its
+    target raw_ table. Idempotent within a snapshot_tag: re-running
+    the same tag is a no-op (the bookkeeping update is the only
+    cross-row state). Files not in RAW_FILE_TARGETS are skipped."""
+    cur = conn.cursor()
+    with zipfile.ZipFile(zip_path) as zf:
+        for inner_name in zf.namelist():
+            target = RAW_FILE_TARGETS.get(Path(inner_name).name)
+            if target is None and not inner_name.upper().startswith("NPDES_DMRS_FY"):
+                continue
+            # Special-case the DMR file — table name is shared but
+            # the snapshot_tag should embed the FY for cross-FY queries.
+            if target is None:
+                target = "raw_npdes_dmrs"
+            _stage_and_copy(cur, zf, inner_name, target, snapshot_tag)
+
+
+def _stage_and_copy(cur, zf, inner_name, target, snapshot_tag):
+    # 1. Extract to a tmpfile (PUT needs a real filesystem path)
+    tmp = Path(f"/tmp/{Path(inner_name).name}")
+    with zf.open(inner_name) as src, tmp.open("wb") as dst:
+        dst.write(src.read())   # streaming-safe via shutil.copyfileobj if needed
+
+    try:
+        # 2. PUT to the named internal stage (one stage per table).
+        cur.execute(f"PUT file://{tmp} @raw_stage_{target} "
+                    f"AUTO_COMPRESS=TRUE OVERWRITE=TRUE")
+
+        # 3. CREATE TABLE IF NOT EXISTS via INFER_SCHEMA — runs only
+        #    on the first-ever load for this target; idempotent.
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {target}
+            USING TEMPLATE (
+                SELECT ARRAY_AGG(OBJECT_CONSTRUCT(*))
+                FROM TABLE(INFER_SCHEMA(
+                    LOCATION => '@raw_stage_{target}/{tmp.name}.gz',
+                    FILE_FORMAT => 'raw_csv_fmt'
+                ))
+            )
+        """)
+        # 3a. Ensure bookkeeping columns exist (safe on existing tables).
+        cur.execute(f"ALTER TABLE {target} ADD COLUMN IF NOT EXISTS "
+                    f"loaded_at TIMESTAMP_NTZ")
+        cur.execute(f"ALTER TABLE {target} ADD COLUMN IF NOT EXISTS "
+                    f"snapshot_tag VARCHAR")
+
+        # 4. COPY — column-name match handles EPA's case quirks.
+        cur.execute(f"""
+            COPY INTO {target}
+            FROM @raw_stage_{target}/{tmp.name}.gz
+            FILE_FORMAT = (FORMAT_NAME = 'raw_csv_fmt')
+            MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
+            ON_ERROR = 'CONTINUE'
+        """)
+
+        # 5. Backfill the two bookkeeping columns for just-loaded rows.
+        cur.execute(f"""
+            UPDATE {target}
+               SET loaded_at = CURRENT_TIMESTAMP(),
+                   snapshot_tag = %s
+             WHERE loaded_at IS NULL
+        """, (snapshot_tag,))
+    finally:
+        tmp.unlink(missing_ok=True)
+```
+
+Wire it into `bulk_loader._run_bulk_inner` after each download:
+
+```python
+# bulk_loader._run_bulk_inner (sketch)
+from . import snowflake_raw_loader
+
+snapshot_tag = datetime.utcnow().strftime("%Y-wk%V")   # ISO week tag
+
+with snowflake_raw_loader.snowflake_connection() as conn:
+    exporter_zip = _download_cached(BULK_URLS["echo_exporter"], cache_dir, "echo_exporter")
+    snowflake_raw_loader.load_zip_to_snowflake(exporter_zip, snapshot_tag, conn)
+    # ...same for the other 5 zips...
+```
+
+This adds the raw layer **as a side effect of the existing
+bulk_loader run** — no separate ETL job to schedule, no separate
+runner to manage. If the Snowflake write fails, the local bulk_loader
+keeps working unchanged (raw staging is wrapped in a try / log.warning
+in production).
+
+## File format + named stages (one-time setup)
+
+```sql
+-- Single shared file format for all raw CSVs. EPA's bulk files are
+-- comma-separated with a header row, double-quoted strings, empty
+-- = NULL. NULL_IF list keeps EPA's sentinels out of typed columns.
+CREATE OR REPLACE FILE FORMAT raw_csv_fmt
+    TYPE = 'CSV'
+    PARSE_HEADER = TRUE
+    FIELD_OPTIONALLY_ENCLOSED_BY = '"'
+    NULL_IF = ('', 'NULL', 'N/A')
+    EMPTY_FIELD_AS_NULL = TRUE
+    ERROR_ON_COLUMN_COUNT_MISMATCH = FALSE
+    SKIP_BLANK_LINES = TRUE;
+
+-- One internal stage per raw_ table — keeps stage-side cleanup
+-- localized when a table is dropped or rebuilt.
+CREATE OR REPLACE STAGE raw_stage_raw_echo_exporter
+    FILE_FORMAT = raw_csv_fmt;
+CREATE OR REPLACE STAGE raw_stage_raw_npdes_violations
+    FILE_FORMAT = raw_csv_fmt;
+CREATE OR REPLACE STAGE raw_stage_raw_sdwa_violations
+    FILE_FORMAT = raw_csv_fmt;
+CREATE OR REPLACE STAGE raw_stage_raw_npdes_limits
+    FILE_FORMAT = raw_csv_fmt;
+CREATE OR REPLACE STAGE raw_stage_raw_npdes_attains
+    FILE_FORMAT = raw_csv_fmt;
+CREATE OR REPLACE STAGE raw_stage_raw_npdes_dmrs
+    FILE_FORMAT = raw_csv_fmt;
+```
+
+## 26-week retention — one weekly Snowflake task
+
+```sql
+CREATE OR REPLACE TASK t_raw_retention_prune
+    WAREHOUSE = wh_small
+    SCHEDULE = 'USING CRON 0 4 * * SUN UTC'   -- Sundays 4 AM UTC
+AS
+    BEGIN
+        DELETE FROM raw_echo_exporter
+            WHERE loaded_at < DATEADD('week', -26, CURRENT_TIMESTAMP());
+        DELETE FROM raw_npdes_violations
+            WHERE loaded_at < DATEADD('week', -26, CURRENT_TIMESTAMP());
+        DELETE FROM raw_sdwa_violations
+            WHERE loaded_at < DATEADD('week', -26, CURRENT_TIMESTAMP());
+        DELETE FROM raw_npdes_limits
+            WHERE loaded_at < DATEADD('week', -26, CURRENT_TIMESTAMP());
+        DELETE FROM raw_npdes_attains
+            WHERE loaded_at < DATEADD('week', -26, CURRENT_TIMESTAMP());
+        DELETE FROM raw_npdes_dmrs
+            WHERE loaded_at < DATEADD('week', -26, CURRENT_TIMESTAMP());
+    END;
+
+ALTER TASK t_raw_retention_prune RESUME;
+```
+
+26 weeks = ~6 months — long enough to support quarter-over-quarter
+analytics and EPA's quarterly SDWA refresh cycle, short enough to
+keep storage costs predictable. To change the window, edit the
+constant in one place. To pause retention temporarily (e.g. during a
+historical analysis), `ALTER TASK t_raw_retention_prune SUSPEND`.
+
+## Trade-offs — what gets harder
+
+- **Schema drift.** If EPA renames a column in `npdes_limits.csv`,
+  the INFER_SCHEMA on first load picks up the new name, but rows
+  loaded under the old name persist under the old column. Cross-
+  snapshot queries that reference the column either need a COALESCE
+  or a schema-evolution migration. Same trap MEMORY.md flags for
+  the streamers, just one layer down.
+- **Cost visibility.** Raw layer storage cost is steady-state; query
+  cost depends on what people run. A naive `SELECT *` against
+  `raw_npdes_dmrs` (~5 GB) costs more than a derived-table query.
+  Worth setting a Snowflake resource monitor on the raw warehouse.
+- **Coupled write surface.** The bulk_loader run now has *two*
+  failure modes (local SQLite write, Snowflake raw write). Wrap the
+  raw load in try/log.warning so a Snowflake outage doesn't break
+  the local lead-generation flow.
+- **Re-load idempotency.** The current loader pattern appends on
+  every COPY (no PK / no dedupe on raw tables — that's intentional,
+  raw is meant to preserve EPA's row-level shape). Re-running the
+  same snapshot_tag twice will double-load. Either guard the loader
+  ("skip if rows with this snapshot_tag already exist") or accept
+  that re-runs append and dedupe at query time via `MAX(loaded_at)`
+  per natural key.
+
+## Decision checklist — enable raw staging if any of these are true
+
+- [ ] You want to re-score historic snapshots against current rules
+- [ ] You have downstream teams (compliance / finance / product) who
+      would query the raw EPA data directly
+- [ ] You need permit-trend analytics that the rolled-up flags can't answer
+- [ ] You want full audit trail from rolled-up signal back to source row
+
+Skip raw staging if none of the above apply — the derived layer is
+sufficient for lead-generation, and the extra surface area isn't free.
+
+---
+
 ## What stays unchanged
 
 The contract between the runner and the state store is what was already
