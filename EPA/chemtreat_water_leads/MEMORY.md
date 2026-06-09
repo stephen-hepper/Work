@@ -281,7 +281,10 @@ Two rule families. Facility rules run on every lead (cheap, summary
 fields from `get_qid`). Event rules run after the high-score drill-down
 and inspect the actual violation events.
 
-**Facility rules** (`RULES`) — 10 total, grouped by signal class:
+**Facility rules** (`RULES`) — 11 total, grouped by signal class.
+Every numeric weight + tier threshold lives in `scoring.WEIGHTS`
+(externalized 2026-06-08; was inline literals before). Weight tuning
+is a one-line edit; no rule-body changes needed.
 
 *Enforcement-status signals* — fire on actions EPA has already taken:
 - SNC flag: 40 (strongest single signal)
@@ -307,6 +310,12 @@ loaded fiscal-year DMR archive:
 - Exceeds permitted, treatable parameter (composite): 15 — the
   strongest single signal in the system, fires when the facility
   is permitted on AND currently exceeding the same treatable class
+
+*SDWA revenue-proxy signal* (added 2026-06-08, TODO E):
+- Population served: tiered 4/7/10 at ≥3K / ≥10K / ≥50K served
+  (`PopulationServedCount` from the SDW API response). API-only —
+  ECHO Exporter doesn't carry PWS metadata at the facility level,
+  so bulk SDWA rows cleanly return None.
 
 **Event rules** (`EVENT_RULES`, applied to facilities scoring ≥50
 after they've been drilled):
@@ -547,11 +556,12 @@ into `_augment_leads(leads, events, touched_keys=None)` so the same
 function services the initial pass (all leads) and the post-fine-comb
 re-run (only touched leads).
 
-### API fine-comb fallback (three independent triggers)
+### API fine-comb fallback (three positive triggers + one backoff gate)
 
 After bulk events load and phase-2 augmentation, `run_bulk` calls
-`_drilldown_candidates(leads, prior_scores)` to pick which leads get
-the API fine-comb drill-down. Three OR'd triggers:
+`_drilldown_candidates(leads, prior_scores, prior_eligibility)` to
+pick which leads get the API fine-comb drill-down. Three OR'd
+positive triggers, then one negative gate:
 
 1. `lead_score >= EVENT_DRILLDOWN_MIN_SCORE` — absolute threshold.
 2. `(registry_id, program) not in prior_scores` — newly discovered
@@ -560,12 +570,17 @@ the API fine-comb drill-down. Three OR'd triggers:
 3. `lead_score > prior_scores[key] + 10` — score jumped by more than
    10. Captures enforcement-trajectory changes regardless of
    absolute score.
+4. **Backoff gate (added 2026-06-09):** if `next_drilldown_eligible_at`
+   is in the future, the lead is SKIPPED even if it cleared a positive
+   trigger. Drives the self-throttling rerun loop — see "Per-row
+   drill-down state" below.
 
-`prior_scores` is loaded once at the top of `run_bulk` via
-`_load_prior_scores(db_path)`, before any upsert, in its own
-`snapshot.open_db` context. Leads that already have events from the
-bulk feed (`outreach_posture != "no_events"`) are excluded from the
-candidate set.
+`prior_scores`, `prior_streaks`, and `prior_eligibility` are loaded
+once at the top of `run_bulk`, before any upsert, in their own
+`snapshot.open_db` contexts (mirrors the `_load_prior_scores`
+pattern). Leads that already have events from the bulk feed
+(`outreach_posture != "no_events"`) are excluded from the candidate
+set before any of the four gates run.
 
 Drills via `pipeline._drill_cwa` / `pipeline._drill_sdwa` (which carry
 the bot-block retry from `echo_client._get`). Re-runs phase-2 only
@@ -702,9 +717,15 @@ COLUMN` for any column not already present in the live DB.
 Idempotent on fresh and legacy DBs.
 
 Tables:
-- `facilities` PK `(registry_id, program)` — 63 columns, every CSV
-  field + `first_seen`/`last_seen` bookkeeping + legacy `snc_flag`
-  (retained for diff comparisons).
+- `facilities` PK `(registry_id, program)` — ~67 user-facing columns
+  plus `first_seen`/`last_seen` bookkeeping + legacy `snc_flag`
+  (retained for diff comparisons). Recent additions: 4 SDWA metadata
+  cols (`population_served`, `system_type`, `owner_type`,
+  `primary_source` — TODO E, 2026-06-08) and 5 drill-down operational
+  cols (`last_drilldown_attempt_at`, `last_drilldown_outcome`,
+  `last_drilldown_run_id`, `drilldown_failure_streak`,
+  `next_drilldown_eligible_at` — 2026-06-09). See the "Per-row
+  drill-down state" subsection below for the rerun-loop contract.
 - `violations` PK `violation_id` — 29 columns, union of CWA-shaped
   (parameter, limit/dmr values, exceedance_pct, npdes_id, stat_basis)
   and SDWA-shaped (violation_code, contaminant, rule_family, etc.).
@@ -766,6 +787,42 @@ membership row), so the two tables stay consistent.
 interleave `last_seen` updates and corrupt the dump filter. Runs must
 be serial. Cron serializes by default; ad-hoc users should not run
 two pipelines side-by-side.
+
+**Per-row drill-down state (added 2026-06-09).** Five new columns on
+`facilities` carry the per-row outcome of the last API drill attempt:
+`last_drilldown_attempt_at`, `last_drilldown_outcome` (one of
+`with_events` / `no_data` / `lookup_failed`), `last_drilldown_run_id`,
+`drilldown_failure_streak`, `next_drilldown_eligible_at`. Vocabulary
+matches `_health.summarize_drilldown` so the JSON view and DB view
+agree.
+
+The drill helpers (`pipeline._drill_cwa` / `_drill_sdwa`) call
+`pipeline._record_drilldown_outcome` on every touched lead. Four of
+the five columns are written from the helper; the fifth
+(`last_drilldown_run_id`) is backfilled by
+`snapshot.diff_and_upsert_facilities` from the `run_id` it already
+has — keeps `record_run` atomic with the upsert.
+
+`pipeline.DRILLDOWN_BACKOFF` is the single source of truth for
+per-outcome retry windows: `with_events` → 7d, `no_data` → 30d,
+`lookup_failed` → 6h. The pipeline computes
+`next_drilldown_eligible_at = now + DRILLDOWN_BACKOFF[outcome]` at
+write time; policy changes need only a one-line edit (no DB
+backfill).
+
+`bulk_loader._drilldown_candidates` reads
+`snapshot.load_prior_drilldown_eligibility` and skips leads whose
+backoff hasn't elapsed. Pipeline path (`pipeline._run_inner`) is
+intentionally NOT gated — it's a manual targeted tool. The
+Snowflake `v_drilldown_eligible` view will run the same SQL gate
+(`WHERE next_drilldown_eligible_at <= CURRENT_TIMESTAMP()`); both
+sides agree on the policy because both read the same column.
+
+Failure streak math: `lookup_failed` increments `prior + 1`;
+`with_events` / `no_data` reset to 0. Prior streak is loaded once
+per run via `snapshot.load_prior_drilldown_state` and threaded into
+both drill helpers + `_short_circuit_remaining`. See
+`SNOWFLAKE_DESIGN.md` for the cross-system contract.
 
 ---
 

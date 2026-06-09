@@ -142,6 +142,7 @@ inventory collapsed onto the same number.
 | `rule_discharges_to_impaired` | 15 | **Pre-violation signal.** +10 when the facility discharges into any 303(d)-impaired waterbody; **+15 instead** when the facility's monitored E90 effluent parameter matches a documented cause of that impairment (rare, but high-confidence permit-tightening lead). Reads `discharges_to_impaired` / `matching_impaired_parameters` from `bulk_loader.stream_attains_linkage` (`npdes_attains_downloads.zip`). Bulk-only. |
 | `rule_recent_dmr_exceedance` | 15 | **Active-compliance signal.** Tiered by severity of the worst single Discharge Monitoring Report exceedance in the loaded fiscal year: +5 / +8 / +10 / +12 / +15 at the 50% / 100% / 200% / 1000% thresholds. Reads `top_exceedance_pct` from `bulk_loader.stream_dmr_exceedances` (`npdes_dmrs_fy<YEAR>.zip`). Bulk-only. |
 | `rule_exceeds_treatable_parameter` | 15 | **Active-compliance composite — strongest single signal in the system.** +15 when the facility is permitted on AND currently exceeding the same ChemTreat-treatable parameter class (e.g. permit covers phosphorus AND they blew their phosphorus limit last quarter). Reads `exceeded_treatable_parameters_text` ∩ `permit_has_*`. Bulk-only. |
+| `rule_population_served` | 10 | **SDWA revenue proxy.** Tiered by `PopulationServedCount`: +4 at ≥3K served, +7 at ≥10K, +10 at ≥50K. A 50K-person utility is a meaningfully larger account than a 200-person mobile-home park, regardless of compliance status. **API-only** — ECHO Exporter doesn't expose population at the facility level, so bulk SDWA leads cleanly return None here (same asymmetry as `permit_has_*` going the other direction). |
 
 #### Event rules (`scoring.EVENT_RULES`)
 
@@ -157,9 +158,15 @@ of just a sum of summary flags.
 | `rule_lead_copper_active` | 10 (or 5) | Lead-and-Copper Rule = specific corrosion-control opportunity. Falls back to the facility-level PbViol/CuViol/LeadAndCopperViol flags at 5 points when no events match. |
 | `rule_only_resolved_demote` | **−30** | If every drilled event is Resolved/Archived, demote so the row sorts below genuinely-open leads. |
 
-To tune: edit the rule functions or add new ones to `RULES` /
-`EVENT_RULES`. There's intentionally no ML here — interpretability
-matters more than a few points of AUC on a marketing dataset.
+To tune weights: every numeric value (base points, multipliers, caps,
+tier thresholds, the resolved-events demote) lives in the `WEIGHTS`
+dict at the top of `scoring.py`. Sales asks like "weight SNC less,
+treatment technique more" are a one-line edit; rule bodies just look
+up into the dict. To add a new rule: define a function above and
+append it to `RULES` / `EVENT_RULES`, plus one new entry in `WEIGHTS`
+for any new numeric value. There's intentionally no ML here —
+interpretability matters more than a few points of AUC on a marketing
+dataset.
 
 #### Tag columns and outreach posture
 
@@ -408,7 +415,9 @@ chemtreat_water_leads/
 ├── RATIONALE.md               # Design decisions behind the bulk path
 ├── EXTERNAL_DATA_STATUS.md    # Running status of external-data integrations (Tier 1/2/3)
 ├── EXTERNAL_DATA_PLAN.md      # Original plan for the permit-limits + ATTAINS integration (historical)
-└── TODO.md                    # Scoring/output follow-ups (D–G from the assessment)
+├── DATA_DESCRIPTION.md        # Full catalog of EPA data sources with refresh cadence + reporting lag
+├── SNOWFLAKE_DESIGN.md        # Target schema, eligibility view, and connector pattern for the Snowflake migration
+└── TODO.md                    # Scoring/output follow-ups (D and E shipped; F/G open)
 
 ../chemtreat_water_leads_viewer/
 ├── index.html        # Single-page CSV viewer (also bundles README /
@@ -436,16 +445,8 @@ looked like a working filter for a while.
 ## Extending it
 
 `TODO.md` tracks the concrete scoring/output follow-ups from the
-methodology assessment:
+methodology assessment. Two are still open:
 
-- **D. Externalize rule weights** — replace inline `return 40, ...`
-  literals with a `WEIGHTS` dict (or YAML). Sales feedback like
-  "weight SNC less, TT more" becomes a config change instead of a code
-  review.
-- **E. Expose dropped facility metadata** — `PopulationServedCount`,
-  `PWSTypeDesc`, `OwnerDesc`, `PrimarySourceDesc` come back in the SDWA
-  response but aren't on the CSV. Population served is a direct revenue
-  proxy. Add the columns and a `rule_population_served` rule.
 - **F. Per-rule strength bands** — `(points, reason, strength ∈ {HIGH,
   MEDIUM, LOW})` and a `signal_strength_breakdown` column.
 - **G. Persist score components** — one column per rule

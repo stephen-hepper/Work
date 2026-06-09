@@ -37,10 +37,11 @@ already handled this — that's why the snapshot PK is composite.
 
 ---
 
-## Drill-down trigger: three independent gates
+## Drill-down trigger: three positive gates + one backoff gate
 
 **Decision.** `_drilldown_candidates` selects leads for API fine-comb
-drill-down using three independent OR'd triggers:
+drill-down using three independent OR'd POSITIVE triggers, then one
+NEGATIVE gate (the backoff window):
 
 1. `lead_score >= EVENT_DRILLDOWN_MIN_SCORE` (50) — the absolute
    threshold; high-value leads always get per-event detail.
@@ -52,6 +53,12 @@ drill-down using three independent OR'd triggers:
    10 points since the prior run. Captures enforcement-trajectory
    changes (a chronic violator just got slapped with a formal action,
    etc.) that matter regardless of absolute score.
+4. **Backoff gate (added 2026-06-09):** `next_drilldown_eligible_at`
+   in the past (or NULL — never drilled). A lead that would otherwise
+   be a candidate gets SKIPPED if we drilled it recently and the
+   per-outcome backoff hasn't elapsed. See "Per-row drill-down state"
+   below for the policy. Closes the rerun loop locally so weekly bulk
+   reruns don't re-trip EPA's throttle on yesterday's failed leads.
 
 Leads with `outreach_posture != "no_events"` (i.e. bulk gave us per-
 event detail already) are excluded — no point re-drilling them.
@@ -266,8 +273,9 @@ from CSV alone.
   `--no-events`.** The handoff suggested it as a possibility; we
   chose the simpler one-flag model. If a future user wants bulk
   events but not API fallback, that's a five-line addition.
-- **Did not change the rule weights.** Externalizing weights is on
-  TODO.md item D, separate from this refactor.
+- **Did not change the rule weights** at the time of those refactors.
+  Externalization shipped later as TODO.md item D — every numeric
+  value now lives in `scoring.WEIGHTS`.
 
 ---
 
@@ -382,3 +390,67 @@ consecutive 429s came back with zero successes between them — the
 throttle is on or off, not flaky. 20 is comfortably past
 "intermittent" without making the user wait too long when the
 throttle is real.
+
+---
+
+## Per-row drill-down state (added 2026-06-08/09)
+
+**Decision.** Every facility row in `snapshot.facilities` carries five
+operational columns recording the *last* drill attempt against EPA
+for that lead: `last_drilldown_attempt_at`, `last_drilldown_outcome`,
+`last_drilldown_run_id`, `drilldown_failure_streak`, and
+`next_drilldown_eligible_at`. The pipeline writes them from
+`_drill_cwa` / `_drill_sdwa` via `_record_drilldown_outcome`; the
+backoff math (`pipeline.DRILLDOWN_BACKOFF`) sets the eligibility
+timestamp per outcome.
+
+**Why per-row, not just per-run.** Sales-side audit + the rerun loop
+both need answers like "when did we last try this facility, and what
+did EPA say?" The `runs` + membership tables answer "which runs
+touched this row," but not "what was the per-row attempt outcome."
+The pre-2026-06-09 design surfaced failed-vs-no-data only in
+`run_health.json` (per-run JSON file), which is fine for the viewer's
+"verify on ECHO" affordance but useless for a Snowflake task or a
+local rerun loop that needs to make decisions row-by-row.
+
+### Backoff policy (`pipeline.DRILLDOWN_BACKOFF`)
+
+| Outcome | Backoff | Why this window |
+|---|---|---|
+| `with_events` | 7 days | Matches EPA's weekly bulk refresh — drilling more often returns the same data |
+| `no_data` | 30 days | EPA already confirmed no events on file; re-asking burns quota without earning anything until something *new* lands |
+| `lookup_failed` | 6 hours | EPA throttle typically clears within an hour; 6h gives margin and dovetails with daily rerun cadence |
+
+Single source of truth in one Python dict — policy changes are a
+one-line edit, and the new windows propagate naturally to every
+subsequent drill's `next_drilldown_eligible_at` write. No DB
+backfill required.
+
+### Local eligibility gate (`_drilldown_candidates`)
+
+The bulk path's candidate selector reads `next_drilldown_eligible_at`
+via `snapshot.load_prior_drilldown_eligibility` and skips any lead
+whose backoff hasn't elapsed. Closes the rerun loop **locally** —
+weekly bulk reruns no longer re-attempt yesterday's failed leads.
+Same logic the Snowflake-side `v_drilldown_eligible` view will run
+(`WHERE next_drilldown_eligible_at <= CURRENT_TIMESTAMP()`); both
+sides agree on the policy because both read the same column.
+
+**Pipeline (API path) intentionally NOT gated.** `pipeline --states X`
+is a targeted tool — the user invoked it expecting to drill
+everything in that territory. The backoff gate would silently filter
+rows back out and surprise the user. Bulk is the auto-loop primary;
+pipeline is the manual override.
+
+### Atomicity of `last_drilldown_run_id`
+
+The drill helpers write only four of the five state columns; the
+fifth (`last_drilldown_run_id`) is backfilled by
+`snapshot.diff_and_upsert_facilities` from the run_id it already
+has. Keeps `record_run` atomic with the upsert block — no need for
+the runner to open the DB twice just to mint a run_id before
+drilling.
+
+See `SNOWFLAKE_DESIGN.md` for the cross-system contract (eligibility
+view, target schema, connector pattern) the Snowflake migration will
+inherit from this local design.

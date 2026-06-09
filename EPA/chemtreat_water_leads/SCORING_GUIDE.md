@@ -30,7 +30,7 @@ Computed for **every** lead, from the summary columns EPA returns in the
 facility listing (`get_qid` for the API path, ECHO Exporter columns for
 bulk). No per-violation detail; just counts and flags.
 
-`scoring.RULES` (10 rules):
+`scoring.RULES` (11 rules):
 
 | Rule | Points | Fires on |
 |---|---|---|
@@ -44,6 +44,11 @@ bulk). No per-violation detail; just counts and flags.
 | `rule_discharges_to_impaired` | 10 or 15 | `discharges_to_impaired=1` (any AU impaired) → +10; `matching_impaired_parameters` populated (effluent matches impairment cause) → +15 instead (no double-counting). Bulk-only, from `npdes_attains_downloads.zip`. |
 | `rule_recent_dmr_exceedance` | 5/8/10/12/15 | Tiered by `top_exceedance_pct` at thresholds 50 / 100 / 200 / 1000%. Bulk-only, from `npdes_dmrs_fy<YEAR>.zip`. |
 | `rule_exceeds_treatable_parameter` | 15 | Composite: any class in `exceeded_treatable_parameters_text` is also in `permit_has_*`. The strongest single signal in the system — "permit covers it AND they're exceeding it." Bulk-only. |
+| `rule_population_served` | 4 / 7 / 10 | Tiered by `PopulationServedCount` at 3K / 10K / 50K. Revenue proxy for SDWA — a major utility is a much bigger account than a 200-person mobile-home park. **API-only** (ECHO Exporter doesn't carry PWS metadata; the rule returns None on bulk SDWA rows). |
+
+All weights and tier thresholds live in the `WEIGHTS` dict at the top
+of `scoring.py`. Sales asks like "weight SNC less, treatment technique
+more" are a one-line edit; no need to touch rule bodies.
 
 The pass-1 score decides who clears `EVENT_DRILLDOWN_MIN_SCORE` (`50`,
 defined in `pipeline.py`) and gets drilled. Anyone below the threshold

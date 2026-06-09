@@ -325,6 +325,41 @@ Pre-violation columns (bulk-only):
 | `impairment_causes_text` | string | Pipe-joined union of impairment causes for waterbodies the outfall touches. |
 | `matching_impaired_parameters` | string | Monitored effluent parameters that match an impairment cause — populates the strongest pre-violation tag. |
 
+SDWA context columns (API path only — ECHO Exporter doesn't carry PWS
+metadata, so bulk SDWA leads leave these empty):
+
+| Column | Type | Use |
+|---|---|---|
+| `population_served` | int | Number of people the PWS serves. Drives `rule_population_served` (+4 / +7 / +10 at ≥3K / ≥10K / ≥50K) — revenue proxy for SDWA. |
+| `system_type` | string | "Community Water System", "Non-Transient Non-Community", etc. |
+| `owner_type` | string | "Local Government", "Private", "Federal", etc. |
+| `primary_source` | string | "Surface Water", "Ground Water", "Purchased", etc. |
+
+Drill-down operational columns (don't filter sales on these — they
+drive the auto-rerun loop, not lead intel):
+
+| Column | Type | Use |
+|---|---|---|
+| `last_drilldown_attempt_at` | ISO ts | When the API drill last ran for this lead. NULL = never drilled. |
+| `last_drilldown_outcome` | enum | `with_events` / `no_data` / `lookup_failed` / NULL. |
+| `last_drilldown_run_id` | int | FK to the `runs` table for the attempt — joins back to `runs.run_at` for audit. |
+| `drilldown_failure_streak` | int | Consecutive `lookup_failed` count; resets on success/no_data. |
+| `next_drilldown_eligible_at` | ISO ts | When this lead is next eligible for re-drill (= attempt_at + `DRILLDOWN_BACKOFF[outcome]`: 7d / 30d / 6h). `bulk_loader` skips rows whose backoff hasn't elapsed; `pipeline --states X` ignores it (manual override). |
+
+**Rerun cadence implications.** The local bulk_loader is now
+self-throttling — you can rerun it as often as you want, and the
+backoff gate skips leads whose retry window hasn't elapsed. Sensible
+schedules:
+
+- **Weekly nationwide bulk** picks up EPA's weekly refresh and
+  naturally triggers ~7-day retries for previously-drilled leads.
+- **Daily bulk reruns** catch failed lookups after EPA throttle
+  clears (the 6h `lookup_failed` window). Each daily run is mostly
+  no-op except for the eligible subset.
+- **`pipeline --states X` for targeted depth** ignores the backoff
+  gate by design — use when you explicitly want to drill everything
+  in a territory (e.g. a Run Health "lookup_failed" gap).
+
 The HTML viewer in `../chemtreat_water_leads_viewer/index.html` reads
 these columns directly — open it in a browser and use the Upload CSV
 button to load `all_leads.csv` (and optionally `violation_events.csv`)

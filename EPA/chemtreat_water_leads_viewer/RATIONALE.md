@@ -263,7 +263,7 @@ group (additive opt-in, not restrictive). The shared `tagTrue()`
 helper accepts both real booleans (seed data) and CSV
 `"True"`/`"False"` strings, so the chips work regardless of source.
 
-The detail panel gains two new blocks rendered conditionally:
+The detail panel gains three new blocks rendered conditionally:
 - `renderPreViolationBlock(r)` — shows treatable permitted
   parameters, matching impairment parameters (bolded if present),
   and downstream impairment causes. Disappears for older CSVs
@@ -273,6 +273,13 @@ The detail panel gains two new blocks rendered conditionally:
   set of treatable classes exceeded. Bolded + red header when
   `tag_exceeds_treatable_parameter` is True (the strongest
   composite signal). Disappears for rows with no exceedance data.
+- `renderSdwaContextBlock(r)` (added 2026-06-08) — SDWA-only.
+  Shows the four PWS metadata fields the API path now exposes:
+  `population_served` (locale-formatted, e.g. "60,000 people"),
+  `system_type`, `owner_type`, `primary_source`. Disappears for
+  CWA leads and for bulk-only SDWA leads where ECHO Exporter
+  didn't supply the fields. Sits between the compliance snapshot
+  and the pre-violation block in the expanded detail panel.
 
 **INT32_MAX special-case render.** When `top_exceedance_pct >=
 99,999`, the block renders "≥ 99,999% (limit may be 0)" rather
