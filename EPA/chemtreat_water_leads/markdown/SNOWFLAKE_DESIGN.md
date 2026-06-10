@@ -10,7 +10,7 @@ drives the rerun loop, the `snowflake-connector-python` integration in
 For acronyms (CWA, SDWA, NPDES, DMR, DFR, ATTAINS, PWS, etc.) see
 [`STARTING_GUIDE.md`](STARTING_GUIDE.md). For the per-row drill-down
 state contract (column meanings, backoff policy) see
-[`snapshot.py`](snapshot.py) FAC_COLUMNS comments and `pipeline.DRILLDOWN_BACKOFF`.
+[`snapshot.py`](../snapshot.py) FAC_COLUMNS comments and `pipeline.DRILLDOWN_BACKOFF`.
 
 ---
 

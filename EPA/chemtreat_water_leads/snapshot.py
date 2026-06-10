@@ -158,7 +158,7 @@ FAC_COLUMNS: dict[str, str] = {
     # The Snowflake eligibility view filters on
     # `next_drilldown_eligible_at`; the pipeline reads
     # `drilldown_failure_streak` at run start for backoff math.
-    # See chemtreat_water_leads/SNOWFLAKE_DESIGN.md for the cross-system
+    # See chemtreat_water_leads/markdown/SNOWFLAKE_DESIGN.md for the cross-system
     # contract.
     #   * last_drilldown_attempt_at: ISO timestamp of last drill attempt
     #     for this (registry_id, program). NULL = never attempted.

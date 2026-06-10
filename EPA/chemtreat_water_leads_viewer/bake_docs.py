@@ -20,7 +20,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 INDEX = HERE / "index.html"
-SRC_DIR = HERE.parent / "chemtreat_water_leads"
+SRC_DIR = HERE.parent / "chemtreat_water_leads" / "markdown"
 
 # (script id, source filename). Order is the order they're written into
 # the sentinel block; not significant for rendering.
