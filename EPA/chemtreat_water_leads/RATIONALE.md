@@ -413,18 +413,23 @@ The pre-2026-06-09 design surfaced failed-vs-no-data only in
 "verify on ECHO" affordance but useless for a Snowflake task or a
 local rerun loop that needs to make decisions row-by-row.
 
-### Backoff policy (`pipeline.DRILLDOWN_BACKOFF`)
+### Backoff policy (`pipeline.DRILLDOWN_BACKOFF` + `LOOKUP_FAILED_BACKOFF_TIERS`)
 
 | Outcome | Backoff | Why this window |
 |---|---|---|
 | `with_events` | 7 days | Matches EPA's weekly bulk refresh — drilling more often returns the same data |
 | `no_data` | 30 days | EPA already confirmed no events on file; re-asking burns quota without earning anything until something *new* lands |
-| `lookup_failed` | 6 hours | EPA throttle typically clears within an hour; 6h gives margin and dovetails with daily rerun cadence |
+| `lookup_failed`, streak 1-2 | 6 hours | First transient throttle. EPA's bot-block typically clears in minutes; 6h is comfortable margin |
+| `lookup_failed`, streak 3-4 | 24 hours | Sustained throttle. Skip the day rather than burn another daily run into an in-progress block |
+| `lookup_failed`, streak 5+ | 7 days | Persistent block. Verified 2026-06-10: EPA returns no `Retry-After` and blocks persist across endpoints for >24h. Aligns failed leads with the weekly bulk refresh |
 
-Single source of truth in one Python dict — policy changes are a
-one-line edit, and the new windows propagate naturally to every
-subsequent drill's `next_drilldown_eligible_at` write. No DB
-backfill required.
+`with_events` and `no_data` come from EPA with a definite answer, so a
+flat per-outcome window is right. `lookup_failed` means EPA didn't
+answer at all — the right window depends on whether this is a one-off
+or sustained, so the policy escalates by `drilldown_failure_streak`.
+Both tables live in `pipeline.py`; policy changes are a one-line edit
+and propagate naturally to every subsequent drill's
+`next_drilldown_eligible_at` write. No DB backfill required.
 
 ### Local eligibility gate (`_drilldown_candidates`)
 

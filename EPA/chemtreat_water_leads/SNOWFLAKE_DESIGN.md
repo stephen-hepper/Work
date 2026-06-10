@@ -223,18 +223,20 @@ WHERE lead_score >= 50                       -- EVENT_DRILLDOWN_MIN_SCORE
     -- Backoff elapsed
     OR next_drilldown_eligible_at <= CURRENT_TIMESTAMP()
   )
-  -- Optional escalation cap: give up after N straight failures.
-  -- Comment in if you want failed leads to drop off after some N.
+  -- Optional escalation cap: give up after N straight failures. The
+  -- Python writer already escalates the backoff window itself (6h →
+  -- 24h → 7d at streak 1-2 / 3-4 / 5+), so this is a hard "drop off
+  -- entirely" cap if you want one. Comment in to enable.
   -- AND COALESCE(drilldown_failure_streak, 0) < 10
 ;
 ```
 
 **Why a view, not a stored column.** Backoff policy lives in
-`pipeline.DRILLDOWN_BACKOFF` and gets written into
-`next_drilldown_eligible_at` at write time. The view's job is just
-to apply the score gate + the time comparison. Policy change → re-write
-the constant in `pipeline.py` and let new runs propagate the new
-timestamps; the view doesn't need to know.
+`pipeline.DRILLDOWN_BACKOFF` + `LOOKUP_FAILED_BACKOFF_TIERS` and gets
+written into `next_drilldown_eligible_at` at write time. The view's
+job is just to apply the score gate + the time comparison. Policy
+change → re-write the constants in `pipeline.py` and let new runs
+propagate the new timestamps; the view doesn't need to know.
 
 ### Companion view for monitoring
 

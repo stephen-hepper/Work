@@ -12,7 +12,9 @@ re-drills too aggressively (wasted API quota) or never retries
 genuinely-failed lookups (cold leads). The tests below pin:
 
   1. The streak math (lookup_failed ++, success/no_data → 0)
-  2. The eligible-at offsets per outcome (7d / 30d / 6h)
+  2. The eligible-at offsets per outcome:
+       * with_events → 7d, no_data → 30d (flat per outcome)
+       * lookup_failed → streak-tiered: 6h (1-2) → 24h (3-4) → 7d (5+)
   3. The drill helpers actually call the recorder
   4. A second pass overwrites the first pass cleanly
   5. The short-circuit marks remaining candidates as lookup_failed
@@ -73,19 +75,65 @@ class TestRecordDrilldownOutcome(unittest.TestCase):
             (FIXED_NOW + timedelta(days=30)).isoformat(timespec="seconds"))
 
     def test_lookup_failed_increments_streak(self):
+        """Prior streak 3 → new streak 4 lands in the (3, 24h) tier."""
         pipeline._record_drilldown_outcome(
             self.lead, "lookup_failed", {("R1", "CWA"): 3}, FIXED_NOW)
         self.assertEqual(self.lead["last_drilldown_outcome"], "lookup_failed")
         self.assertEqual(self.lead["drilldown_failure_streak"], 4)
         self.assertEqual(
             self.lead["next_drilldown_eligible_at"],
-            (FIXED_NOW + timedelta(hours=6)).isoformat(timespec="seconds"))
+            (FIXED_NOW + timedelta(days=1)).isoformat(timespec="seconds"))
 
     def test_no_prior_streak_starts_at_one_on_failure(self):
-        """First-ever drill attempt that fails — streak goes 0 → 1."""
+        """First-ever drill attempt that fails — streak goes 0 → 1 and
+        lands in the 6h floor tier."""
         pipeline._record_drilldown_outcome(
             self.lead, "lookup_failed", {}, FIXED_NOW)
         self.assertEqual(self.lead["drilldown_failure_streak"], 1)
+        self.assertEqual(
+            self.lead["next_drilldown_eligible_at"],
+            (FIXED_NOW + timedelta(hours=6)).isoformat(timespec="seconds"))
+
+    def test_lookup_failed_tier_floor_six_hours(self):
+        """Streak 2 (a transient throttle) stays on the 6h tier."""
+        pipeline._record_drilldown_outcome(
+            self.lead, "lookup_failed", {("R1", "CWA"): 1}, FIXED_NOW)
+        self.assertEqual(self.lead["drilldown_failure_streak"], 2)
+        self.assertEqual(
+            self.lead["next_drilldown_eligible_at"],
+            (FIXED_NOW + timedelta(hours=6)).isoformat(timespec="seconds"))
+
+    def test_lookup_failed_tier_sustained_24h(self):
+        """Streak 3 crosses into 'sustained throttle' — bump to 24h so
+        we stop burning a daily run into an in-progress block."""
+        pipeline._record_drilldown_outcome(
+            self.lead, "lookup_failed", {("R1", "CWA"): 2}, FIXED_NOW)
+        self.assertEqual(self.lead["drilldown_failure_streak"], 3)
+        self.assertEqual(
+            self.lead["next_drilldown_eligible_at"],
+            (FIXED_NOW + timedelta(days=1)).isoformat(timespec="seconds"))
+
+    def test_lookup_failed_tier_persistent_seven_days(self):
+        """Streak 5 means the throttle is sustained across at least
+        several attempts — align with EPA's weekly bulk refresh
+        cadence rather than re-attempting daily."""
+        pipeline._record_drilldown_outcome(
+            self.lead, "lookup_failed", {("R1", "CWA"): 4}, FIXED_NOW)
+        self.assertEqual(self.lead["drilldown_failure_streak"], 5)
+        self.assertEqual(
+            self.lead["next_drilldown_eligible_at"],
+            (FIXED_NOW + timedelta(days=7)).isoformat(timespec="seconds"))
+
+    def test_lookup_failed_high_streak_caps_at_seven_days(self):
+        """The 7d tier is the ceiling — extreme streaks shouldn't
+        keep escalating indefinitely. Validates the highest tier
+        is also the cap."""
+        pipeline._record_drilldown_outcome(
+            self.lead, "lookup_failed", {("R1", "CWA"): 50}, FIXED_NOW)
+        self.assertEqual(self.lead["drilldown_failure_streak"], 51)
+        self.assertEqual(
+            self.lead["next_drilldown_eligible_at"],
+            (FIXED_NOW + timedelta(days=7)).isoformat(timespec="seconds"))
 
     def test_unknown_outcome_raises(self):
         """Defensive — refactor mustn't smuggle in a typo'd outcome."""

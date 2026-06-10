@@ -174,9 +174,12 @@ FAC_COLUMNS: dict[str, str] = {
     #     give-up logic ("escalate after N straight failures").
     #   * next_drilldown_eligible_at: ISO timestamp this row becomes
     #     eligible for re-drill. Computed as
-    #     `last_drilldown_attempt_at + DRILLDOWN_BACKOFF[outcome]`
-    #     (pipeline.py). NULL = never attempted; eligibility view
-    #     treats NULL as "eligible whenever score warrants."
+    #     `last_drilldown_attempt_at + backoff`, where `backoff` comes
+    #     from `DRILLDOWN_BACKOFF[outcome]` for with_events/no_data
+    #     (flat 7d / 30d) and from `LOOKUP_FAILED_BACKOFF_TIERS` for
+    #     lookup_failed (streak-tiered 6h → 24h → 7d). Both live in
+    #     pipeline.py. NULL = never attempted; eligibility view treats
+    #     NULL as "eligible whenever score warrants."
     "last_drilldown_attempt_at":   "TEXT",
     "last_drilldown_outcome":      "TEXT",
     "last_drilldown_run_id":       "INTEGER",

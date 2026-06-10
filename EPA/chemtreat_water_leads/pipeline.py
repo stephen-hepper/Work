@@ -58,20 +58,72 @@ LOOKBACK_DAYS = 365
 # writes that timestamp at the end of each drill attempt based on this
 # policy.
 #
-# Tuning these values is a policy decision — see
-# SNOWFLAKE_DESIGN.md for the trade-off. The current values balance
-# freshness against EPA API quota:
+# `DRILLDOWN_BACKOFF` covers the non-escalating outcomes — both come
+# back from EPA with a definite answer ("here are events" / "no events
+# on file"), so the right retry cadence is a function of how often EPA
+# itself refreshes the underlying data:
 #   * with_events: 7d (matches EPA's weekly bulk refresh — drilling more
 #     often returns the same data)
 #   * no_data: 30d (EPA confirmed no events on file; burning quota to
 #     re-confirm doesn't earn anything until something *new* lands)
-#   * lookup_failed: 6h (EPA throttle typically clears within an hour;
-#     6h gives margin and dovetails with daily rerun cadence)
+#
+# `lookup_failed` is structurally different — it means EPA's API didn't
+# answer at all (HTTP 429 / connection drop / bot-block). The right
+# retry cadence depends on whether this is the FIRST throttle hit (likely
+# transient, clear in hours) or part of a sustained block (verified
+# 2026-06-10: EPA returns no Retry-After header and the block persists
+# across endpoints for >24h). So lookup_failed lives in its own
+# streak-tiered table — see `_lookup_failed_backoff` below.
 DRILLDOWN_BACKOFF: dict[str, timedelta] = {
-    "with_events":   timedelta(days=7),
-    "no_data":       timedelta(days=30),
-    "lookup_failed": timedelta(hours=6),
+    "with_events": timedelta(days=7),
+    "no_data":     timedelta(days=30),
 }
+
+# Recognised outcome values. `_record_drilldown_outcome` checks against
+# this set rather than DRILLDOWN_BACKOFF directly, because lookup_failed
+# is no longer a key in that dict.
+_VALID_OUTCOMES: frozenset[str] = frozenset(
+    DRILLDOWN_BACKOFF.keys() | {"lookup_failed"}
+)
+
+# Streak-tiered backoff for `lookup_failed`. Highest-threshold-first list;
+# `_lookup_failed_backoff` iterates and returns the first match against
+# the *new* streak (i.e. after this attempt's increment).
+#
+# The tiers encode three operational regimes:
+#   * streak 1-2 → 6h:  a single transient throttle. EPA's bot-block and
+#                       DFR thin-response throttles both clear within
+#                       minutes; 6h is comfortable margin and dovetails
+#                       with the daily rerun cadence.
+#   * streak 3-4 → 24h: sustained throttle. Either we tripped EPA's
+#                       rolling rate limit hard, or peak-hours load means
+#                       short-term retry is wasted. 24h skips a full
+#                       business-day window.
+#   * streak 5+  → 7d:  persistent block. At this point we're in the
+#                       weekly-bulk-refresh regime — there's almost
+#                       certainly nothing new EPA could give us until
+#                       their own refresh cycle anyway. Bonus: lines
+#                       failed leads up with the bulk cadence so they
+#                       retry alongside fresh discovery rather than
+#                       fighting it.
+LOOKUP_FAILED_BACKOFF_TIERS: tuple[tuple[int, timedelta], ...] = (
+    (5, timedelta(days=7)),
+    (3, timedelta(days=1)),
+    (1, timedelta(hours=6)),
+)
+
+
+def _lookup_failed_backoff(new_streak: int) -> timedelta:
+    """Pick the backoff for a `lookup_failed` outcome based on its
+    *post-increment* streak. Highest matching tier wins."""
+    for threshold, backoff in LOOKUP_FAILED_BACKOFF_TIERS:
+        if new_streak >= threshold:
+            return backoff
+    # Unreachable in practice (the (1, 6h) tier matches any streak >= 1
+    # and _record_drilldown_outcome only calls this with streak >= 1),
+    # but defaulting to the 6h floor keeps a hypothetical streak=0 caller
+    # consistent rather than crashing.
+    return timedelta(hours=6)
 
 
 def _record_drilldown_outcome(lead: dict, outcome: str,
@@ -93,19 +145,26 @@ def _record_drilldown_outcome(lead: dict, outcome: str,
     the existing `failed_keys` discard-on-success semantics.
 
     Streak math:
-      * 'lookup_failed' -> prior_streak + 1
-      * 'with_events' / 'no_data' -> 0  (reset on any non-failure)
+      * 'lookup_failed' -> prior_streak + 1, backoff via the streak-tiered
+        `LOOKUP_FAILED_BACKOFF_TIERS` (6h → 24h → 7d as failures pile up)
+      * 'with_events' / 'no_data' -> 0  (reset on any non-failure); backoff
+        from the flat `DRILLDOWN_BACKOFF` dict (7d / 30d)
     """
-    if outcome not in DRILLDOWN_BACKOFF:
+    if outcome not in _VALID_OUTCOMES:
         raise ValueError(f"unknown drill-down outcome: {outcome!r}")
     key = (lead.get("registry_id"), lead.get("program"))
     prior = prior_streaks.get(key, 0)
-    streak = prior + 1 if outcome == "lookup_failed" else 0
+    if outcome == "lookup_failed":
+        streak = prior + 1
+        backoff = _lookup_failed_backoff(streak)
+    else:
+        streak = 0
+        backoff = DRILLDOWN_BACKOFF[outcome]
     lead["last_drilldown_attempt_at"] = now.isoformat(timespec="seconds")
     lead["last_drilldown_outcome"] = outcome
     lead["drilldown_failure_streak"] = streak
     lead["next_drilldown_eligible_at"] = (
-        (now + DRILLDOWN_BACKOFF[outcome]).isoformat(timespec="seconds")
+        (now + backoff).isoformat(timespec="seconds")
     )
 
 

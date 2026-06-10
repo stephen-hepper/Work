@@ -2767,6 +2767,7 @@ inventory collapsed onto the same number.
 | `rule_discharges_to_impaired` | 15 | **Pre-violation signal.** +10 when the facility discharges into any 303(d)-impaired waterbody; **+15 instead** when the facility's monitored E90 effluent parameter matches a documented cause of that impairment (rare, but high-confidence permit-tightening lead). Reads `discharges_to_impaired` / `matching_impaired_parameters` from `bulk_loader.stream_attains_linkage` (`npdes_attains_downloads.zip`). Bulk-only. |
 | `rule_recent_dmr_exceedance` | 15 | **Active-compliance signal.** Tiered by severity of the worst single Discharge Monitoring Report exceedance in the loaded fiscal year: +5 / +8 / +10 / +12 / +15 at the 50% / 100% / 200% / 1000% thresholds. Reads `top_exceedance_pct` from `bulk_loader.stream_dmr_exceedances` (`npdes_dmrs_fy<YEAR>.zip`). Bulk-only. |
 | `rule_exceeds_treatable_parameter` | 15 | **Active-compliance composite — strongest single signal in the system.** +15 when the facility is permitted on AND currently exceeding the same ChemTreat-treatable parameter class (e.g. permit covers phosphorus AND they blew their phosphorus limit last quarter). Reads `exceeded_treatable_parameters_text` ∩ `permit_has_*`. Bulk-only. |
+| `rule_population_served` | 10 | **SDWA revenue proxy.** Tiered by `PopulationServedCount`: +4 at ≥3K served, +7 at ≥10K, +10 at ≥50K. A 50K-person utility is a meaningfully larger account than a 200-person mobile-home park, regardless of compliance status. **API-only** — ECHO Exporter doesn't expose population at the facility level, so bulk SDWA leads cleanly return None here (same asymmetry as `permit_has_*` going the other direction). |
 
 #### Event rules (`scoring.EVENT_RULES`)
 
@@ -2782,9 +2783,15 @@ of just a sum of summary flags.
 | `rule_lead_copper_active` | 10 (or 5) | Lead-and-Copper Rule = specific corrosion-control opportunity. Falls back to the facility-level PbViol/CuViol/LeadAndCopperViol flags at 5 points when no events match. |
 | `rule_only_resolved_demote` | **−30** | If every drilled event is Resolved/Archived, demote so the row sorts below genuinely-open leads. |
 
-To tune: edit the rule functions or add new ones to `RULES` /
-`EVENT_RULES`. There's intentionally no ML here — interpretability
-matters more than a few points of AUC on a marketing dataset.
+To tune weights: every numeric value (base points, multipliers, caps,
+tier thresholds, the resolved-events demote) lives in the `WEIGHTS`
+dict at the top of `scoring.py`. Sales asks like "weight SNC less,
+treatment technique more" are a one-line edit; rule bodies just look
+up into the dict. To add a new rule: define a function above and
+append it to `RULES` / `EVENT_RULES`, plus one new entry in `WEIGHTS`
+for any new numeric value. There's intentionally no ML here —
+interpretability matters more than a few points of AUC on a marketing
+dataset.
 
 #### Tag columns and outreach posture
 
@@ -3033,7 +3040,9 @@ chemtreat_water_leads/
 ├── RATIONALE.md               # Design decisions behind the bulk path
 ├── EXTERNAL_DATA_STATUS.md    # Running status of external-data integrations (Tier 1/2/3)
 ├── EXTERNAL_DATA_PLAN.md      # Original plan for the permit-limits + ATTAINS integration (historical)
-└── TODO.md                    # Scoring/output follow-ups (D–G from the assessment)
+├── DATA_DESCRIPTION.md        # Full catalog of EPA data sources with refresh cadence + reporting lag
+├── SNOWFLAKE_DESIGN.md        # Target schema, eligibility view, and connector pattern for the Snowflake migration
+└── TODO.md                    # Scoring/output follow-ups (D and E shipped; F/G open)
 
 ../chemtreat_water_leads_viewer/
 ├── index.html        # Single-page CSV viewer (also bundles README /
@@ -3061,16 +3070,8 @@ looked like a working filter for a while.
 ## Extending it
 
 `TODO.md` tracks the concrete scoring/output follow-ups from the
-methodology assessment:
+methodology assessment. Two are still open:
 
-- **D. Externalize rule weights** — replace inline `return 40, ...`
-  literals with a `WEIGHTS` dict (or YAML). Sales feedback like
-  "weight SNC less, TT more" becomes a config change instead of a code
-  review.
-- **E. Expose dropped facility metadata** — `PopulationServedCount`,
-  `PWSTypeDesc`, `OwnerDesc`, `PrimarySourceDesc` come back in the SDWA
-  response but aren't on the CSV. Population served is a direct revenue
-  proxy. Add the columns and a `rule_population_served` rule.
 - **F. Per-rule strength bands** — `(points, reason, strength ∈ {HIGH,
   MEDIUM, LOW})` and a `signal_strength_breakdown` column.
 - **G. Persist score components** — one column per rule
@@ -3132,7 +3133,7 @@ Computed for **every** lead, from the summary columns EPA returns in the
 facility listing (`get_qid` for the API path, ECHO Exporter columns for
 bulk). No per-violation detail; just counts and flags.
 
-`scoring.RULES` (10 rules):
+`scoring.RULES` (11 rules):
 
 | Rule | Points | Fires on |
 |---|---|---|
@@ -3146,6 +3147,11 @@ bulk). No per-violation detail; just counts and flags.
 | `rule_discharges_to_impaired` | 10 or 15 | `discharges_to_impaired=1` (any AU impaired) → +10; `matching_impaired_parameters` populated (effluent matches impairment cause) → +15 instead (no double-counting). Bulk-only, from `npdes_attains_downloads.zip`. |
 | `rule_recent_dmr_exceedance` | 5/8/10/12/15 | Tiered by `top_exceedance_pct` at thresholds 50 / 100 / 200 / 1000%. Bulk-only, from `npdes_dmrs_fy<YEAR>.zip`. |
 | `rule_exceeds_treatable_parameter` | 15 | Composite: any class in `exceeded_treatable_parameters_text` is also in `permit_has_*`. The strongest single signal in the system — "permit covers it AND they're exceeding it." Bulk-only. |
+| `rule_population_served` | 4 / 7 / 10 | Tiered by `PopulationServedCount` at 3K / 10K / 50K. Revenue proxy for SDWA — a major utility is a much bigger account than a 200-person mobile-home park. **API-only** (ECHO Exporter doesn't carry PWS metadata; the rule returns None on bulk SDWA rows). |
+
+All weights and tier thresholds live in the `WEIGHTS` dict at the top
+of `scoring.py`. Sales asks like "weight SNC less, treatment technique
+more" are a one-line edit; no need to touch rule bodies.
 
 The pass-1 score decides who clears `EVENT_DRILLDOWN_MIN_SCORE` (`50`,
 defined in `pipeline.py`) and gets drilled. Anyone below the threshold
@@ -3607,6 +3613,43 @@ Pre-violation columns (bulk-only):
 | `permit_has_*` | 0/1 | Per-class boolean (phosphorus / ammonia / TSS / BOD / oil-grease / metals / cyanide / chlorine residual). |
 | `impairment_causes_text` | string | Pipe-joined union of impairment causes for waterbodies the outfall touches. |
 | `matching_impaired_parameters` | string | Monitored effluent parameters that match an impairment cause — populates the strongest pre-violation tag. |
+
+SDWA context columns (API path only — ECHO Exporter doesn't carry PWS
+metadata, so bulk SDWA leads leave these empty):
+
+| Column | Type | Use |
+|---|---|---|
+| `population_served` | int | Number of people the PWS serves. Drives `rule_population_served` (+4 / +7 / +10 at ≥3K / ≥10K / ≥50K) — revenue proxy for SDWA. |
+| `system_type` | string | "Community Water System", "Non-Transient Non-Community", etc. |
+| `owner_type` | string | "Local Government", "Private", "Federal", etc. |
+| `primary_source` | string | "Surface Water", "Ground Water", "Purchased", etc. |
+
+Drill-down operational columns (don't filter sales on these — they
+drive the auto-rerun loop, not lead intel):
+
+| Column | Type | Use |
+|---|---|---|
+| `last_drilldown_attempt_at` | ISO ts | When the API drill last ran for this lead. NULL = never drilled. |
+| `last_drilldown_outcome` | enum | `with_events` / `no_data` / `lookup_failed` / NULL. |
+| `last_drilldown_run_id` | int | FK to the `runs` table for the attempt — joins back to `runs.run_at` for audit. |
+| `drilldown_failure_streak` | int | Consecutive `lookup_failed` count; resets on success/no_data. |
+| `next_drilldown_eligible_at` | ISO ts | When this lead is next eligible for re-drill (= attempt_at + the backoff for this outcome). `with_events`/`no_data` are flat (7d / 30d); `lookup_failed` escalates by streak (6h at 1-2, 24h at 3-4, 7d at 5+). `bulk_loader` skips rows whose backoff hasn't elapsed; `pipeline --states X` ignores it (manual override). |
+
+**Rerun cadence implications.** The local bulk_loader is now
+self-throttling — you can rerun it as often as you want, and the
+backoff gate skips leads whose retry window hasn't elapsed. Sensible
+schedules:
+
+- **Weekly nationwide bulk** picks up EPA's weekly refresh and
+  naturally triggers ~7-day retries for previously-drilled leads.
+- **Daily bulk reruns** catch failed lookups after the throttle window
+  elapses. First-failure `lookup_failed` rows clear in 6h (so they're
+  back in play the next day); rows that fail repeatedly escalate to 24h
+  and then 7d, so a daily cron stops grinding into a sustained block.
+  Each daily run is mostly no-op except for the eligible subset.
+- **`pipeline --states X` for targeted depth** ignores the backoff
+  gate by design — use when you explicitly want to drill everything
+  in a territory (e.g. a Run Health "lookup_failed" gap).
 
 The HTML viewer in `../chemtreat_water_leads_viewer/index.html` reads
 these columns directly — open it in a browser and use the Upload CSV

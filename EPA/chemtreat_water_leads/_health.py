@@ -147,8 +147,9 @@ def write_run_health(out_dir: Path, *,
                      secondary_drilldown_min_score: int) -> Path:
     """Write `out/run_health.json` and return the path.
 
-    Schema version pinned to 1. Bump if keys change; the viewer's
-    `renderHealth()` refuses to render unknown versions.
+    Schema version is `SCHEMA_VERSION` (currently 2). Bump it if keys
+    change; the viewer's `renderHealth()` refuses to render unknown
+    versions.
     """
     leads_cwa = sum(1 for L in leads if L.get("program") == "CWA")
     leads_sdwa = sum(1 for L in leads if L.get("program") == "SDWA")

@@ -344,7 +344,7 @@ drive the auto-rerun loop, not lead intel):
 | `last_drilldown_outcome` | enum | `with_events` / `no_data` / `lookup_failed` / NULL. |
 | `last_drilldown_run_id` | int | FK to the `runs` table for the attempt — joins back to `runs.run_at` for audit. |
 | `drilldown_failure_streak` | int | Consecutive `lookup_failed` count; resets on success/no_data. |
-| `next_drilldown_eligible_at` | ISO ts | When this lead is next eligible for re-drill (= attempt_at + `DRILLDOWN_BACKOFF[outcome]`: 7d / 30d / 6h). `bulk_loader` skips rows whose backoff hasn't elapsed; `pipeline --states X` ignores it (manual override). |
+| `next_drilldown_eligible_at` | ISO ts | When this lead is next eligible for re-drill (= attempt_at + the backoff for this outcome). `with_events`/`no_data` are flat (7d / 30d); `lookup_failed` escalates by streak (6h at 1-2, 24h at 3-4, 7d at 5+). `bulk_loader` skips rows whose backoff hasn't elapsed; `pipeline --states X` ignores it (manual override). |
 
 **Rerun cadence implications.** The local bulk_loader is now
 self-throttling — you can rerun it as often as you want, and the
@@ -353,9 +353,11 @@ schedules:
 
 - **Weekly nationwide bulk** picks up EPA's weekly refresh and
   naturally triggers ~7-day retries for previously-drilled leads.
-- **Daily bulk reruns** catch failed lookups after EPA throttle
-  clears (the 6h `lookup_failed` window). Each daily run is mostly
-  no-op except for the eligible subset.
+- **Daily bulk reruns** catch failed lookups after the throttle window
+  elapses. First-failure `lookup_failed` rows clear in 6h (so they're
+  back in play the next day); rows that fail repeatedly escalate to 24h
+  and then 7d, so a daily cron stops grinding into a sustained block.
+  Each daily run is mostly no-op except for the eligible subset.
 - **`pipeline --states X` for targeted depth** ignores the backoff
   gate by design — use when you explicitly want to drill everything
   in a territory (e.g. a Run Health "lookup_failed" gap).

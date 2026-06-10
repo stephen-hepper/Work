@@ -240,6 +240,19 @@ def _get(path: str, params: dict[str, Any]) -> dict:
             time.sleep(backoff)
         log.debug("GET %s %s", url, params)
         r = session.get(url, params=params, timeout=TIMEOUT)
+        # Diagnostic: log EPA's Retry-After hint on 429 before raising so
+        # we can tell whether their throttle window matches our 6h
+        # `lookup_failed` backoff. WarningCollector lands this in
+        # run_health.json. Logged once per 429, not once per retry.
+        if r.status_code == 429:
+            retry_after = r.headers.get("Retry-After")
+            if retry_after:
+                log.warning("EPA 429 with Retry-After=%s on %s",
+                            retry_after, path)
+            else:
+                log.warning("EPA 429 with NO Retry-After header on %s "
+                            "(headers: %s)", path,
+                            ", ".join(sorted(r.headers.keys())))
         r.raise_for_status()
         try:
             payload = r.json()

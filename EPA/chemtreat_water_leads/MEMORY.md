@@ -803,12 +803,22 @@ the five columns are written from the helper; the fifth
 `snapshot.diff_and_upsert_facilities` from the `run_id` it already
 has — keeps `record_run` atomic with the upsert.
 
-`pipeline.DRILLDOWN_BACKOFF` is the single source of truth for
-per-outcome retry windows: `with_events` → 7d, `no_data` → 30d,
-`lookup_failed` → 6h. The pipeline computes
-`next_drilldown_eligible_at = now + DRILLDOWN_BACKOFF[outcome]` at
-write time; policy changes need only a one-line edit (no DB
-backfill).
+Backoff policy lives in two `pipeline.py` constants:
+
+  * `DRILLDOWN_BACKOFF` covers the answered outcomes: `with_events` →
+    7d, `no_data` → 30d. Flat per-outcome — both come back from EPA
+    with a definite answer, so cadence is just a function of how often
+    EPA itself refreshes.
+  * `LOOKUP_FAILED_BACKOFF_TIERS` covers `lookup_failed` — EPA didn't
+    answer at all (429 / bot-block / connection drop), so the policy
+    escalates by streak: 6h at 1-2, 24h at 3-4, 7d at 5+. Verified
+    2026-06-10: EPA returns no `Retry-After` header and persistent
+    blocks span >24h across endpoints, so flat 6h was burning daily
+    runs into in-progress blocks.
+
+The pipeline computes `next_drilldown_eligible_at = now + backoff` at
+write time using whichever table applies; policy changes need only a
+one-line edit (no DB backfill).
 
 `bulk_loader._drilldown_candidates` reads
 `snapshot.load_prior_drilldown_eligibility` and skips leads whose
