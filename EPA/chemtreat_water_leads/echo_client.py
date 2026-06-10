@@ -69,7 +69,7 @@ BOT_BLOCK_BACKOFF_SCHEDULE = (5, 15, 45)   # seconds between retries
 # unidentified scraper, which raises the bot-block probability.
 USER_AGENT = (
     "chemtreat-water-leads/1.0 (lead-gen tool; "
-    "https://github.com/chemtreat/water-leads)"
+    "stephen.hepper@chemtreat.com)"
 )
 
 
