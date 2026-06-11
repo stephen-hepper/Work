@@ -64,8 +64,16 @@ chemtreat_sales_briefings/
 ├── __init__.py
 ├── README.md      ← you are here
 ├── briefings.py   ← tools + LLM loop + email render/send + CLI
-└── regions.py     ← region → states → sales lead config (edit freely)
+├── regions.py     ← region → states → sales lead config (edit freely)
+└── state.py       ← briefings_state.sqlite — "which leads featured when"
 ```
+
+State lives in a separate `briefings_state.sqlite` (default location:
+`EPA/briefings_state.sqlite`, alongside `snapshot.sqlite`) so this
+package never writes to the pipeline's snapshot DB. The snapshot is
+opened `mode=ro` everywhere it's read; the state DB is opened
+read-only for the candidate JOIN and read-write only by
+`state.record_briefing_run`.
 
 Single-file main on purpose. When it grows past ~600 lines or a second
 consumer shows up, split `briefings.py` into `tools.py` + `llm.py` +
@@ -95,10 +103,22 @@ cd ~/PycharmProjects/Work/EPA
 
 # Actually send via SMTP (requires SMTP env vars below)
 ../.venv/bin/python -m chemtreat_sales_briefings.briefings --send
+
+# Mark featured leads so they don't re-surface next run (independent
+# of --send so you can mark dry-runs or send without marking)
+../.venv/bin/python -m chemtreat_sales_briefings.briefings --mark-briefed
+
+# Tune how many candidates per region per run
+../.venv/bin/python -m chemtreat_sales_briefings.briefings --leads-per-region 15
+
+# Force a re-brief (ignore prior briefing state — testing only)
+../.venv/bin/python -m chemtreat_sales_briefings.briefings --force-rebrief
 ```
 
-The DB path defaults to `../snapshot.sqlite` (one level above this
-package), matching the layout in `EPA/`. Override with `--db`.
+Both DB paths default to the current working directory — `snapshot.sqlite`
+and `briefings_state.sqlite`. That assumes you run from `EPA/` (per the
+examples above). Override with `--db` or `--state-db` if your layout
+differs.
 
 ---
 
@@ -159,6 +179,97 @@ elsewhere.
 
 ---
 
+## Volume control & the state DB
+
+The pipeline tracks ~40K leads. Briefing all of them is neither
+useful (sales can't read 40K bullets) nor honest (most haven't moved
+since last week). Two mechanisms keep briefings focused:
+
+### 1. The `briefing_candidates` tool is the LLM's primary feature source
+
+It returns leads that warrant a fresh briefing right now — not the
+top-N by score. A lead qualifies as a candidate when **any one** of:
+
+| `briefing_status` | When it fires |
+|---|---|
+| `never_briefed` | No row in `lead_briefings` for this `(registry_id, program)`. First-time leads always surface. |
+| `score_changed` | Current `lead_score` differs from `lead_score_at_brief` by more than 5. Surfaces leads whose situation shifted. The 5-point threshold matches the design intent of catching meaningful moves while not flapping on noise. |
+| `new_activity` | `facilities.last_seen` is newer than `lead_briefings.last_featured_at`. The bulk pipeline touched this lead after we last briefed it — usually means new events or refreshed signals. |
+
+Each candidate row carries `briefing_status` so the LLM's prose can
+frame correctly: a `never_briefed` lead reads as a fresh find, a
+`score_changed` lead reads as an update ("score jumped 142 → 168"
+using the included `prior_lead_score`), a `new_activity` lead reads
+as a refresh.
+
+The system prompt steers the LLM toward `briefing_candidates` and
+explicitly tells it to acknowledge an empty result rather than fall
+back to `top_leads` to fill space. `top_leads` and the other tools
+remain available as supplements.
+
+### 2. `--leads-per-region` is a hard cap on candidate count
+
+Default 10. Enforced inside `tool_briefing_candidates` — the LLM can
+ask for more, but the cap clamps the response. So even when the
+candidate pool is wide (e.g. immediately after a major run with lots
+of new activity), the LLM sees at most N leads per region per call.
+
+### Marking is independent of sending
+
+| Flag | Behavior |
+|---|---|
+| no flags | dry-run, no marking — pure iteration mode |
+| `--send` | actually email, no marking — useful when you want to send the same briefing again next run |
+| `--mark-briefed` | mark featured leads, no email — useful for advancing the candidate pool during testing |
+| `--send --mark-briefed` | the production combo — email and advance state |
+| `--force-rebrief` | bypass the candidate filter entirely; return top leads by score regardless of prior brief. For testing; doesn't interact with marking. |
+
+The marking writes both a `briefing_runs` row (audit log) and one
+`lead_briefings` row per featured lead (state). The `lead_score` and
+`last_seen` at briefing time get recorded so the next run's
+candidate predicate can compute deltas.
+
+### Schema (briefings_state.sqlite)
+
+```sql
+CREATE TABLE briefing_runs (
+    briefing_run_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_at           TEXT NOT NULL,
+    region           TEXT NOT NULL,
+    mode             TEXT NOT NULL,         -- 'dry_run' or 'send'
+    lead_count       INTEGER NOT NULL
+);
+
+CREATE TABLE lead_briefings (
+    registry_id           TEXT NOT NULL,
+    program               TEXT NOT NULL,
+    last_featured_at      TEXT NOT NULL,
+    last_featured_run_id  INTEGER,          -- FK to briefing_runs
+    lead_score_at_brief   INTEGER,
+    last_seen_at_brief    TEXT,
+    region                TEXT,
+    PRIMARY KEY (registry_id, program)
+);
+```
+
+The candidate query LEFT JOINs `facilities` (in `snapshot.sqlite`)
+with `lead_briefings` (in `briefings_state.sqlite`) via
+`ATTACH DATABASE` — both opened read-only for the read path. The
+write path uses a separate read-write connection to the state DB
+only.
+
+### Caveat — what gets marked
+
+The script marks **every lead returned by `briefing_candidates`**,
+not just the ones the LLM literally cited in the briefing prose. So
+if the cap returns 10 candidates and the LLM features 6 in the
+final write-up, all 10 are marked. This slightly over-marks but
+keeps the script simple. If you want only-actually-featured marking,
+swap the post-run write for an LLM tool call like `submit_briefing`
+that the model invokes with the explicit registry_ids it included.
+
+---
+
 ## Tool reference
 
 What the LLM can call. Every tool returns JSON-serialisable data; arrays
@@ -169,8 +280,9 @@ the conversation lean.
 |---|---|---|
 | `list_regions` | — | All region names. |
 | `region_summary` | `region` | Leads-per-program, leads-per-outreach-posture, signal-tag fires across the region. The "orient yourself" call. |
-| `top_leads` | `region`, `limit?` (≤100), `min_score?` (default 50) | Top-scored facilities in the region, with score, reasons, posture, and signal tags. |
-| `newly_seen` | `region`, `since_days?` (1-90, default 14), `limit?`, `min_score?` (default 30) | Facilities first seen in the last N days. The "fresh signal" call. |
+| **`briefing_candidates`** | `region`, `limit?`, `min_score?` (default 50) | **Primary feature source.** Leads warranting a fresh briefing — never-briefed, score moved by >5, or new bulk activity since last briefing. Capped by `--leads-per-region`. Each row carries `briefing_status` and (for `score_changed`) `prior_lead_score`. |
+| `top_leads` | `region`, `limit?` (≤100), `min_score?` (default 50) | Top-scored facilities ignoring briefing history. Use only for supplementary context — `briefing_candidates` is the main feature source. |
+| `newly_seen` | `region`, `since_days?` (1-90, default 14), `limit?`, `min_score?` (default 30) | Facilities first seen in the last N days. Supplementary to `briefing_candidates`. |
 | `active_snc` | `region`, `limit?` | Currently-flagged Significant Non-Compliers. |
 | `lead_detail` | `registry_id`, `program` | Full row for one facility, including pre-violation signals and the ECHO URL. |
 | `violation_events` | `registry_id`, `program`, `limit?` (≤50, default 10) | Per-event violation rows — CWA carries per-DMR parameter / limit / exceedance %; SDWA carries category + status. |
@@ -215,9 +327,10 @@ so each region's briefing is addressed correctly.
 - **No HTML email.** Plaintext / markdown only. Easier to debug, reads
   fine in any client. Upgrade path: swap `msg.set_content` for a
   multipart payload with an HTML alternative.
-- **No persistence of past briefings.** Each run is independent. If
-  the model needs context like "what did we send last week," add a
-  `recent_briefings` tool backed by a simple JSON log.
+- **No persistence of past briefing prose.** `briefings_state.sqlite`
+  records *which leads were featured when*, not the rendered text. If
+  the model needs to read back "what did we say about facility X last
+  week," add a `briefings_text` table and a `recent_briefing` tool.
 - **No CRM integration.** The output is email. Wire to Salesforce /
   HubSpot when sales asks for it.
 - **No retry / queue.** A failed SMTP send raises and bails on the
@@ -247,21 +360,51 @@ so each region's briefing is addressed correctly.
 
 ## Quick smoke test (no LLM call)
 
-To verify the tool layer reads the DB correctly without spending
-tokens:
+Two useful tests that don't burn tokens:
 
 ```bash
 cd ~/PycharmProjects/Work/EPA
+
+# 1. Read-only: confirm region_summary returns sane numbers
 ../.venv/bin/python -c "
 from chemtreat_sales_briefings.briefings import tool_region_summary
 from pathlib import Path
 import json
-print(json.dumps(tool_region_summary(Path('snapshot.sqlite'),
-                                     {'region': 'Gulf'}),
+ctx = {'db_path': Path('snapshot.sqlite')}
+print(json.dumps(tool_region_summary(ctx, {'region': 'Gulf'}),
                  indent=2, default=str))
+"
+
+# 2. State + candidates: confirm gating works end-to-end against a
+#    throwaway state DB
+../.venv/bin/python -c "
+from chemtreat_sales_briefings import state, briefings
+from pathlib import Path
+state_path = Path('/tmp/test_briefings_state.sqlite')
+state_path.unlink(missing_ok=True)
+ctx = {
+    'db_path': Path('snapshot.sqlite'),
+    'state_path': state_path,
+    'leads_per_region': 5,
+    'force_rebrief': False,
+    'candidates_tracker': {},
+}
+# First call: 5 candidates, all never_briefed
+r = briefings.tool_briefing_candidates(ctx, {'region': 'Gulf'})
+print(f'first call: {len(r[\"candidates\"])} candidates')
+for c in r['candidates'][:3]:
+    print(f'  {c[\"company\"]} ({c[\"state\"]}) status={c[\"briefing_status\"]}')
+# Mark them, then second call should return the NEXT 5
+state.record_briefing_run(state_path, 'Gulf', 'dry_run',
+                          ctx['candidates_tracker']['Gulf'])
+ctx['candidates_tracker'] = {}
+r2 = briefings.tool_briefing_candidates(ctx, {'region': 'Gulf'})
+print(f'after marking: {len(r2[\"candidates\"])} candidates (next batch)')
+state_path.unlink(missing_ok=True)
 "
 ```
 
-That exercises `_open_db`, the state resolution, and one
-`_query_region_summary` against your real snapshot — no Azure
-required.
+The first exercises the read-only DB path. The second exercises the
+candidate filter end-to-end against a throwaway state DB — proves the
+JOIN works, the predicate fires correctly, and marking advances the
+pool. No Azure required for either.

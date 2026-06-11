@@ -1,5 +1,7 @@
 """Regional sales briefings: query snapshot.sqlite via narrow tools,
-let Azure OpenAI draft a briefing per region, optionally email it.
+let Azure OpenAI draft a briefing per region, optionally email it,
+and track which leads have been featured so the next run doesn't
+re-feature the same ones.
 
 Architecture
 ------------
@@ -14,8 +16,23 @@ Region names are the LLM-facing identity for territory; the mapping to
 state lists is enforced inside this script (regions.py). The LLM cannot
 widen its scope past what regions.py defines.
 
+Volume control
+--------------
+The `briefing_candidates` tool is the primary "what to write about"
+call — it returns ONLY leads that warrant a fresh briefing
+(never-briefed, score moved by > 5 since last briefing, or fresh EPA
+activity since last briefing). The cap on candidates per region is
+enforced inside the tool by `--leads-per-region` (default 10), so the
+LLM cannot exceed it. Briefing state (which lead was featured when)
+lives in a separate `briefings_state.sqlite` so the briefings package
+never writes to snapshot.sqlite — the pipeline's read-only contract is
+preserved.
+
 Run with `--dry-run` (default) to print to stdout. `--send` enables the
-SMTP path; required env vars are validated before any LLM call.
+SMTP path. Marking leads as "featured" is controlled separately via
+`--mark-briefed` — pass it (with --send or stand-alone) when you want
+the candidate pool to shrink for the next run. `--force-rebrief`
+bypasses the candidate filter for testing.
 
 See README.md for the full design rationale, env vars, and tool reference.
 """
@@ -34,7 +51,7 @@ from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 
-from . import regions
+from . import regions, state
 
 
 log = logging.getLogger("chemtreat.briefings")
@@ -168,9 +185,6 @@ def _query_region_summary(conn, states: list[str]) -> dict:
     ).fetchall()
     out["by_outreach_posture"] = [dict(r) for r in by_posture]
 
-    # Top-signal tag fires across the region. Each tag has its own count
-    # rather than a SUM over a CASE chain so we surface them all in one
-    # query without per-tag SQL repetition.
     out["tag_counts"] = {}
     for tag in _LEAD_TAG_COLS:
         n = conn.execute(
@@ -219,10 +233,12 @@ def _query_violation_events(conn, registry_id: str, program: str,
 
 # ----------------------------------------------------------- tool layer
 #
-# Each tool is a thin adapter: validate arguments, resolve `region` to
-# its state list, call the matching `_query_*` function, return the
-# result. Error paths return a `{"error": str}` dict so the LLM can
-# react instead of the loop crashing.
+# Tools take a `ctx` dict carrying all the runtime config the script
+# threads through (db paths, candidate cap, force-rebrief flag, plus a
+# `candidates_tracker` dict the briefing_candidates tool writes into so
+# the script can record which leads were shown to the LLM). This single-
+# signature shape keeps the dispatcher simple and adds new context
+# without rewriting every tool.
 
 def _resolve_region(region: str) -> list[str]:
     try:
@@ -233,31 +249,31 @@ def _resolve_region(region: str) -> list[str]:
         )
 
 
-def tool_list_regions(_db, _args: dict) -> dict:
+def tool_list_regions(_ctx: dict, _args: dict) -> dict:
     return {"regions": regions.all_region_names()}
 
 
-def tool_region_summary(db_path: Path, args: dict) -> dict:
+def tool_region_summary(ctx: dict, args: dict) -> dict:
     states = _resolve_region(args["region"])
-    with _open_db(db_path) as conn:
+    with _open_db(ctx["db_path"]) as conn:
         return _query_region_summary(conn, states)
 
 
-def tool_top_leads(db_path: Path, args: dict) -> dict:
+def tool_top_leads(ctx: dict, args: dict) -> dict:
     states = _resolve_region(args["region"])
     limit = min(int(args.get("limit", 20)), 100)
     min_score = int(args.get("min_score", 50))
-    with _open_db(db_path) as conn:
+    with _open_db(ctx["db_path"]) as conn:
         return {"leads": _query_top_leads(conn, states, limit, min_score)}
 
 
-def tool_newly_seen(db_path: Path, args: dict) -> dict:
+def tool_newly_seen(ctx: dict, args: dict) -> dict:
     states = _resolve_region(args["region"])
     days = min(max(int(args.get("since_days", 14)), 1), 90)
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat(timespec="seconds")
     limit = min(int(args.get("limit", 20)), 100)
     min_score = int(args.get("min_score", 30))
-    with _open_db(db_path) as conn:
+    with _open_db(ctx["db_path"]) as conn:
         return {
             "since_days": days,
             "since_iso": cutoff,
@@ -265,33 +281,88 @@ def tool_newly_seen(db_path: Path, args: dict) -> dict:
         }
 
 
-def tool_active_snc(db_path: Path, args: dict) -> dict:
+def tool_active_snc(ctx: dict, args: dict) -> dict:
     states = _resolve_region(args["region"])
     limit = min(int(args.get("limit", 20)), 100)
-    with _open_db(db_path) as conn:
+    with _open_db(ctx["db_path"]) as conn:
         return {"leads": _query_active_snc(conn, states, limit)}
 
 
-def tool_lead_detail(db_path: Path, args: dict) -> dict:
-    with _open_db(db_path) as conn:
+def tool_lead_detail(ctx: dict, args: dict) -> dict:
+    with _open_db(ctx["db_path"]) as conn:
         row = _query_lead_detail(conn, args["registry_id"], args["program"])
     if row is None:
         return {"error": "no facility with that (registry_id, program)"}
     return row
 
 
-def tool_violation_events(db_path: Path, args: dict) -> dict:
+def tool_violation_events(ctx: dict, args: dict) -> dict:
     limit = min(int(args.get("limit", 10)), 50)
-    with _open_db(db_path) as conn:
+    with _open_db(ctx["db_path"]) as conn:
         events = _query_violation_events(
             conn, args["registry_id"], args["program"], limit
         )
     return {"events": events}
 
 
+def tool_briefing_candidates(ctx: dict, args: dict) -> dict:
+    """Return leads that warrant a fresh briefing in this region.
+
+    Cap on the returned set is enforced by `ctx['leads_per_region']`;
+    the LLM cannot exceed it even if it asks for more. Each returned
+    row carries a `briefing_status` (never_briefed / score_changed /
+    new_activity) so the prose can frame the lead correctly.
+
+    Side-effect: the returned candidate set is recorded into
+    `ctx['candidates_tracker'][region]` so the script can mark these
+    leads as featured after the briefing completes (when
+    `--mark-briefed` is set).
+    """
+    region = args["region"]
+    states = _resolve_region(region)
+    cap = int(ctx["leads_per_region"])
+    requested = int(args.get("limit", cap))
+    limit = min(requested, cap)
+    min_score = int(args.get("min_score", 50))
+
+    candidates = state.candidates_for_states(
+        snapshot_path=ctx["db_path"],
+        state_path=ctx["state_path"],
+        states=states,
+        limit=limit,
+        min_score=min_score,
+        force_rebrief=ctx.get("force_rebrief", False),
+    )
+
+    tracker = ctx.get("candidates_tracker")
+    if tracker is not None:
+        # Stash minimal info needed to mark these later.
+        tracker.setdefault(region, [])
+        existing_keys = {
+            (c["registry_id"], c["program"]) for c in tracker[region]
+        }
+        for c in candidates:
+            key = (c.get("registry_id"), c.get("program"))
+            if key[0] and key[1] and key not in existing_keys:
+                tracker[region].append({
+                    "registry_id": c["registry_id"],
+                    "program": c["program"],
+                    "lead_score": c.get("lead_score"),
+                    "last_seen": c.get("last_seen"),
+                })
+                existing_keys.add(key)
+
+    return {
+        "region": region,
+        "leads_per_region_cap": cap,
+        "candidates": candidates,
+    }
+
+
 TOOL_HANDLERS = {
     "list_regions": tool_list_regions,
     "region_summary": tool_region_summary,
+    "briefing_candidates": tool_briefing_candidates,
     "top_leads": tool_top_leads,
     "newly_seen": tool_newly_seen,
     "active_snc": tool_active_snc,
@@ -301,10 +372,6 @@ TOOL_HANDLERS = {
 
 
 # ----------------------------------------------------------- tool schemas
-#
-# OpenAI function-calling shape. Descriptions matter — the model uses
-# them to decide which tool fits the current need. Be specific about
-# what each tool is for and what shape it returns.
 
 TOOL_SCHEMAS = [
     {
@@ -341,12 +408,43 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "briefing_candidates",
+            "description": (
+                "Primary source of briefing material. Returns leads in "
+                "the region that warrant a fresh briefing — either "
+                "never-briefed, scored changed by more than 5 since last "
+                "briefing, or fresh EPA activity since last briefing. "
+                "The cap on returned leads is enforced by the script "
+                "(typically 10 per region); you cannot exceed it. "
+                "Each row carries `briefing_status` so you know whether "
+                "to frame as a first-time feature or an update."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "region": {"type": "string"},
+                    "limit": {"type": "integer",
+                              "description": "Requested cap — actual "
+                              "ceiling is the script's --leads-per-region "
+                              "(default 10)."},
+                    "min_score": {"type": "integer",
+                                  "description": "Minimum lead_score "
+                                  "(default 50)."},
+                },
+                "required": ["region"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "top_leads",
             "description": (
-                "Top-scored leads in a region. Returns a list of "
-                "facility rows with score, reasons, outreach posture, "
-                "and the relevant signal tags. Use this as the main "
-                "source of briefing material."
+                "Top-scored leads in a region, ignoring briefing history. "
+                "Use sparingly — only when you need broader context that "
+                "`briefing_candidates` didn't surface (e.g. to mention "
+                "an inventory tier the candidates don't reflect). The "
+                "main feature list should come from `briefing_candidates`."
             ),
             "parameters": {
                 "type": "object",
@@ -369,7 +467,8 @@ TOOL_SCHEMAS = [
             "description": (
                 "Facilities first observed in the snapshot DB in the "
                 "last N days. Use this to surface fresh signal — leads "
-                "that appeared since the prior weekly run."
+                "that appeared since the prior weekly run. Mostly "
+                "supplementary to briefing_candidates."
             ),
             "parameters": {
                 "type": "object",
@@ -395,7 +494,9 @@ TOOL_SCHEMAS = [
             "description": (
                 "Currently-flagged Significant Non-Compliers in a "
                 "region. SNC is EPA's red-flag designation — the "
-                "strongest single signal in the system."
+                "strongest single signal in the system. Useful when "
+                "you want to call attention to SNCs the candidate set "
+                "didn't include."
             ),
             "parameters": {
                 "type": "object",
@@ -453,12 +554,12 @@ TOOL_SCHEMAS = [
 ]
 
 
-def dispatch(name: str, args: dict, db_path: Path) -> dict:
+def dispatch(name: str, args: dict, ctx: dict) -> dict:
     handler = TOOL_HANDLERS.get(name)
     if handler is None:
         return {"error": f"unknown tool {name!r}"}
     try:
-        return handler(db_path, args)
+        return handler(ctx, args)
     except (KeyError, ValueError, TypeError, sqlite3.Error) as e:
         # Return errors as data so the model can try a different
         # argument rather than the loop crashing on a bad tool call.
@@ -474,14 +575,27 @@ who already understand the EPA data model.
 
 The briefing should:
   - Open with a one-paragraph summary of the region this week.
-  - Highlight 5-10 leads worth the rep's attention, with a one-line
-    rationale each. Lead with `company (city, state, score)`.
+  - Feature the leads returned by `briefing_candidates` — that tool
+    enforces the volume cap and only returns leads worth re-surfacing.
+    Each candidate carries a `briefing_status`:
+      * never_briefed: first time on a briefing — frame as a fresh find
+      * score_changed: re-surfacing with a score shift — cite the
+        delta using `prior_lead_score` ("score jumped 142 → 168")
+      * new_activity: re-surfacing because the bulk run touched it
+        since last briefing — usually means new event data or refreshed
+        signals; mention what's new
+  - Lead each feature with `company (city, state, score)` plus a
+    one-line rationale tied to score_reasons or the signal tags.
   - Group thoughtfully — by score tier, by industry, or by signal class
     (active SNC vs. pre-violation vs. recent exceedance). Pick the
     grouping that produces the cleanest story; don't force all three.
   - Note any "verify-first" cases (outreach_posture = verify_first or
     historical) so the rep doesn't cold-call about resolved issues.
   - End with 1-3 concrete next steps for the rep.
+
+If `briefing_candidates` returns 0 candidates, say so plainly — the
+region is in a steady state and there's nothing fresh to brief. Don't
+fall back to `top_leads` just to fill space.
 
 Be terse. Sales leaders are busy. Markdown formatting. No preamble like
 "Here is your briefing" — start with the heading. Don't invent data;
@@ -497,19 +611,22 @@ def build_user_prompt(region: str, today: str) -> str:
     return (
         f"Draft this week's sales briefing for the {region} region. "
         f"Today is {today}. The audience is {lead['name']}.\n\n"
-        f"Start by calling `region_summary` to get oriented. Then pull "
-        f"top leads, fresh activity (newly_seen), and active SNC. Use "
-        f"`lead_detail` or `violation_events` for any standout you plan "
-        f"to feature."
+        f"Workflow: call `region_summary` first to orient, then "
+        f"`briefing_candidates` to get the feature list (volume-capped "
+        f"to what's worth surfacing this run), then `lead_detail` or "
+        f"`violation_events` only for standouts you want to detail. "
+        f"Skip `top_leads` unless the candidate set is short and you "
+        f"need broader context."
     )
 
 
 # ----------------------------------------------------------- LLM loop
 
 def run_one_region(client, deployment: str, region: str,
-                   db_path: Path) -> str:
+                   ctx: dict) -> str:
     """Run the tool-use loop for one region. Returns the final briefing
-    text the model emitted."""
+    text the model emitted. `ctx` is the runtime config dict — see
+    `tool_briefing_candidates` for what it contains."""
     today = datetime.utcnow().strftime("%Y-%m-%d")
     messages: list[dict] = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -528,13 +645,10 @@ def run_one_region(client, deployment: str, region: str,
         if not msg.tool_calls:
             return msg.content or ""
 
-        # Append the assistant turn (with tool_calls) verbatim, then
-        # one tool response per call, then loop. model_dump turns the
-        # SDK object into the dict shape the next request expects.
         messages.append(msg.model_dump(exclude_unset=True, exclude_none=True))
         for tc in msg.tool_calls:
             args = json.loads(tc.function.arguments or "{}")
-            result = dispatch(tc.function.name, args, db_path)
+            result = dispatch(tc.function.name, args, ctx)
             log.info("[%s] tool=%s args=%s -> %d-key result",
                      region, tc.function.name, args,
                      len(result) if isinstance(result, dict) else -1)
@@ -604,13 +718,33 @@ def main() -> None:
         description="Generate regional ChemTreat sales briefings via "
                     "Azure OpenAI with narrow snapshot.sqlite tools."
     )
-    p.add_argument("--db", default="../snapshot.sqlite",
-                   help="Path to snapshot.sqlite (default: ../snapshot.sqlite)")
+    p.add_argument("--db", default="snapshot.sqlite",
+                   help="Path to snapshot.sqlite (default: snapshot.sqlite, "
+                        "i.e. the current working directory — typically "
+                        "EPA/ when invoked per the README)")
+    p.add_argument("--state-db", default="briefings_state.sqlite",
+                   help="Path to briefings_state.sqlite — tracks which "
+                        "leads have been featured (default: "
+                        "briefings_state.sqlite, alongside snapshot.sqlite)")
     p.add_argument("--regions", default=None,
                    help="Comma-separated region names (default: all)")
+    p.add_argument("--leads-per-region", type=int, default=10,
+                   help="Hard cap on candidates per region per run "
+                        "(default 10). The LLM cannot exceed this.")
     p.add_argument("--send", action="store_true",
                    help="Actually send email. Default is --dry-run "
                         "(print to stdout).")
+    p.add_argument("--mark-briefed", action="store_true",
+                   help="After each region's briefing, mark the "
+                        "candidate leads as featured. Without this "
+                        "flag, no state is written — useful for "
+                        "iterating on tone. Independent of --send "
+                        "so you can mark dry-runs or send without "
+                        "marking, whichever fits your workflow.")
+    p.add_argument("--force-rebrief", action="store_true",
+                   help="Ignore the candidate filter — return top "
+                        "leads by score regardless of briefing "
+                        "history. For testing the gating logic.")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
@@ -623,6 +757,11 @@ def main() -> None:
     if not db_path.exists():
         sys.exit(f"DB not found: {db_path}")
 
+    state_path = Path(args.state_db).expanduser().resolve()
+    # init creates the file + tables if missing. Idempotent.
+    state.init_state_db(state_path)
+    log.info("Briefings state DB: %s", state_path)
+
     if args.regions:
         wanted = [r.strip() for r in args.regions.split(",")]
         for r in wanted:
@@ -633,8 +772,6 @@ def main() -> None:
         wanted = regions.all_region_names()
 
     if args.send:
-        # Validate SMTP env upfront — surface missing creds before any
-        # tokens are spent on LLM calls.
         missing = [k for k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD")
                    if not os.environ.get(k)]
         if missing:
@@ -644,9 +781,21 @@ def main() -> None:
     deployment = os.environ["AZURE_OPENAI_DEPLOYMENT"]
     today = datetime.utcnow().strftime("%Y-%m-%d")
 
+    # candidates_tracker collects the candidate set the LLM saw, per
+    # region. The mark step at the end of each region reads from this
+    # to know what to write.
+    candidates_tracker: dict[str, list[dict]] = {}
+
     for region in wanted:
         log.info("Drafting briefing for %s...", region)
-        body = run_one_region(client, deployment, region, db_path)
+        ctx = {
+            "db_path": db_path,
+            "state_path": state_path,
+            "leads_per_region": args.leads_per_region,
+            "force_rebrief": args.force_rebrief,
+            "candidates_tracker": candidates_tracker,
+        }
+        body = run_one_region(client, deployment, region, ctx)
         msg = render_email(region, body, today)
 
         if args.send:
@@ -660,6 +809,18 @@ def main() -> None:
             print()
             print(body)
             print()
+
+        if args.mark_briefed:
+            featured = candidates_tracker.get(region, [])
+            if featured:
+                mode = "send" if args.send else "dry_run"
+                run_id = state.record_briefing_run(
+                    state_path, region, mode, featured)
+                log.info("Marked %d leads as featured for %s "
+                         "(briefing_run_id=%d)", len(featured), region, run_id)
+            else:
+                log.info("No candidates surfaced for %s — nothing to mark",
+                         region)
 
 
 if __name__ == "__main__":
