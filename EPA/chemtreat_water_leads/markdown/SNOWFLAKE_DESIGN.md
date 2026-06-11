@@ -116,6 +116,7 @@ CREATE OR REPLACE TABLE facilities (
     permit_has_metals                 NUMBER(1),
     permit_has_cyanide                NUMBER(1),
     permit_has_chlorine_residual      NUMBER(1),
+    permit_has_microbiological        NUMBER(1),
     permitted_parameters_text         VARCHAR,
 
     -- ATTAINS pre-violation signals

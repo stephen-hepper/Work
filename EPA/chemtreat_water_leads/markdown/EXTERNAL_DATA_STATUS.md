@@ -24,9 +24,10 @@ gone wrong yet**:
 
 - **Permit covers our chemistry** — the facility's NPDES permit
   *lists* a treatable parameter (BOD, ammonia, phosphorus, TSS,
-  oil/grease, metals, chlorine residual). They may be 100 % compliant
-  today; the signal says "if they ever need help with this parameter,
-  they're a buyer, because it's in their regulatory file."
+  oil/grease, metals, chlorine residual, microbiological — coliform
+  / E. coli / Enterococci / fecal indicators). They may be 100 %
+  compliant today; the signal says "if they ever need help with this
+  parameter, they're a buyer, because it's in their regulatory file."
 - **Discharges to impaired water** — the outfall sits upstream of a
   303(d)-listed waterbody. Current permit may be fine, but the state
   is legally obligated to write a TMDL and tighten limits at the next

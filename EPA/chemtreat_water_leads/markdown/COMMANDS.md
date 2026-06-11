@@ -299,7 +299,7 @@ Excel without parsing the score-reasons string:
 | `tag_lead_copper` | bool | Active Lead/Copper Rule violation or facility-level Pb/Cu flag. |
 | `tag_major_facility` | bool | NPDES "Major" permit (high flow / high load — CWA only). |
 | `tag_only_resolved_events` | bool | Has drilled events, all Resolved/Archived. Sales should verify or skip. |
-| `tag_treatable_permit` | bool | NPDES permit covers a ChemTreat-treatable parameter class (phosphorus / ammonia / TSS / BOD / oil-grease / metals / cyanide / chlorine residual). Pre-violation signal — bulk-only. |
+| `tag_treatable_permit` | bool | NPDES permit covers a ChemTreat-treatable parameter class (phosphorus / ammonia / TSS / BOD / oil-grease / metals / cyanide / chlorine residual / microbiological). Pre-violation signal — bulk-only. |
 | `tag_discharges_to_impaired` | bool | Outfall is upstream of a 303(d)-listed impaired waterbody. Bulk-only. |
 | `tag_impairment_parameter_match` | bool | Facility's monitored effluent parameter matches a documented cause of the downstream impairment. Strongest pre-violation signal. Bulk-only. |
 | `tag_recent_exceedance` | bool | Has at least one DMR exceedance in the loaded fiscal-year archive. Bulk-only. |
@@ -321,7 +321,7 @@ Pre-violation columns (bulk-only):
 | Column | Type | Use |
 |---|---|---|
 | `permitted_parameters_text` | string | Pipe-joined sample of treatable parameter descriptions on the permit. |
-| `permit_has_*` | 0/1 | Per-class boolean (phosphorus / ammonia / TSS / BOD / oil-grease / metals / cyanide / chlorine residual). |
+| `permit_has_*` | 0/1 | Per-class boolean (phosphorus / ammonia / TSS / BOD / oil-grease / metals / cyanide / chlorine residual / microbiological). |
 | `impairment_causes_text` | string | Pipe-joined union of impairment causes for waterbodies the outfall touches. |
 | `matching_impaired_parameters` | string | Monitored effluent parameters that match an impairment cause — populates the strongest pre-violation tag. |
 

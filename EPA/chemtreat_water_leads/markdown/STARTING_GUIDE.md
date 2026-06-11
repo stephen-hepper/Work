@@ -108,8 +108,9 @@ The run takes ~10-30 minutes (faster on subsequent runs within the
 2. Adds **pre-violation signals** — which ChemTreat-treatable
    parameters each permit covers (phosphorus, ammonia, TSS, BOD,
    oil/grease, metals incl. iron/manganese, cyanide, chlorine
-   residual), and whether each facility discharges to a downstream
-   303(d)-impaired waterbody.
+   residual, microbiological — coliform / E. coli / Enterococci /
+   fecal indicators), and whether each facility discharges to a
+   downstream 303(d)-impaired waterbody.
 3. Adds **active-compliance signals** — which facilities are
    currently exceeding their permit limits this fiscal year, and on
    which chemicals.

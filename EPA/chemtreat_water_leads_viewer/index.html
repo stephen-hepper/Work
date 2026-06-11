@@ -2763,7 +2763,7 @@ inventory collapsed onto the same number.
 | `rule_major_facility` | 10 | "Major" NPDES permits = high flow / high pollutant load = larger ChemTreat opportunity. CWA-only signal. |
 | `rule_recent_penalty` | 5–8 | Tiered by penalty size. CWA-only (SDW has no per-system penalty amount). |
 | `rule_recent_inspection` | 5 | EPA actively watching = facility under time pressure. |
-| `rule_treatable_permit_parameter` | 15 | **Pre-violation signal.** +5 per ChemTreat-treatable parameter class on the facility's NPDES permit (phosphorus, ammonia, TSS, BOD, oil/grease, metals — incl. Fe/Mn, cyanide, chlorine residual), capped. Reads `permit_has_*` columns populated by `bulk_loader.stream_permit_limits` from `npdes_limits.zip`. Bulk-only signal; pipeline.run leaves these columns empty and the rule cleanly returns None there. |
+| `rule_treatable_permit_parameter` | 15 | **Pre-violation signal.** +5 per ChemTreat-treatable parameter class on the facility's NPDES permit (phosphorus, ammonia, TSS, BOD, oil/grease, metals — incl. Fe/Mn, cyanide, chlorine residual, microbiological — coliform / E. coli / Enterococci / fecal indicators), capped. Reads `permit_has_*` columns populated by `bulk_loader.stream_permit_limits` from `npdes_limits.zip`. Bulk-only signal; pipeline.run leaves these columns empty and the rule cleanly returns None there. |
 | `rule_discharges_to_impaired` | 15 | **Pre-violation signal.** +10 when the facility discharges into any 303(d)-impaired waterbody; **+15 instead** when the facility's monitored E90 effluent parameter matches a documented cause of that impairment (rare, but high-confidence permit-tightening lead). Reads `discharges_to_impaired` / `matching_impaired_parameters` from `bulk_loader.stream_attains_linkage` (`npdes_attains_downloads.zip`). Bulk-only. |
 | `rule_recent_dmr_exceedance` | 15 | **Active-compliance signal.** Tiered by severity of the worst single Discharge Monitoring Report exceedance in the loaded fiscal year: +5 / +8 / +10 / +12 / +15 at the 50% / 100% / 200% / 1000% thresholds. Reads `top_exceedance_pct` from `bulk_loader.stream_dmr_exceedances` (`npdes_dmrs_fy<YEAR>.zip`). Bulk-only. |
 | `rule_exceeds_treatable_parameter` | 15 | **Active-compliance composite — strongest single signal in the system.** +15 when the facility is permitted on AND currently exceeding the same ChemTreat-treatable parameter class (e.g. permit covers phosphorus AND they blew their phosphorus limit last quarter). Reads `exceeded_treatable_parameters_text` ∩ `permit_has_*`. Bulk-only. |
@@ -3031,25 +3031,35 @@ chemtreat_water_leads/
 ├── pipeline.py                # API-based orchestration (regional / state pulls)
 ├── bulk_loader.py             # CSV-based orchestration (nationwide pulls) + permit/ATTAINS/DMR streamers
 ├── _health.py                 # Run-health JSON writer + WarningCollector log handler
-├── README.md                  # Methodology — you are here
-├── STARTING_GUIDE.md          # First-time guide for sales-facing users
-├── COMMANDS.md                # Practical run patterns & time estimates
-├── SCORING_GUIDE.md           # Two-pass scoring + which command produces which pass
-├── DIAGRAM.md                 # State map of bulk vs API depths
-├── MEMORY.md                  # Field-name traps & the silent-failure trail
-├── RATIONALE.md               # Design decisions behind the bulk path
-├── EXTERNAL_DATA_STATUS.md    # Running status of external-data integrations (Tier 1/2/3)
-├── EXTERNAL_DATA_PLAN.md      # Original plan for the permit-limits + ATTAINS integration (historical)
-├── DATA_DESCRIPTION.md        # Full catalog of EPA data sources with refresh cadence + reporting lag
-├── SNOWFLAKE_DESIGN.md        # Target schema, eligibility view, and connector pattern for the Snowflake migration
-└── TODO.md                    # Scoring/output follow-ups (D and E shipped; F/G open)
+└── markdown/                  # All package docs live here
+    ├── README.md              # Methodology — you are here
+    ├── STARTING_GUIDE.md      # First-time guide for sales-facing users
+    ├── COMMANDS.md            # Practical run patterns & time estimates
+    ├── SCORING_GUIDE.md       # Two-pass scoring + which command produces which pass
+    ├── DIAGRAM.md             # State map of bulk vs API depths
+    ├── MEMORY.md              # Field-name traps & the silent-failure trail
+    ├── RATIONALE.md           # Design decisions behind the bulk path
+    ├── EXTERNAL_DATA_STATUS.md  # Running status of external-data integrations
+    ├── EXTERNAL_DATA_PLAN.md  # Original plan for the permit-limits + ATTAINS integration (historical)
+    ├── DATA_DESCRIPTION.md    # Full catalog of EPA data sources with refresh cadence + reporting lag
+    ├── SNOWFLAKE_DESIGN.md    # Target schema, eligibility view, and connector pattern for the Snowflake migration
+    └── TODO.md                # Scoring/output follow-ups (D and E shipped; F/G open)
 
 ../chemtreat_water_leads_viewer/
-├── index.html        # Single-page CSV viewer (also bundles README /
-│                     # SCORING_GUIDE / COMMANDS as in-page doc tabs)
-├── bake_docs.py      # Re-embed the bundled docs after editing them:
-│                     # `python -m chemtreat_water_leads_viewer.bake_docs`
-└── RATIONALE.md      # Viewer design notes & gap list
+├── index.html             # Single-page CSV viewer (also bundles README /
+│                          # SCORING_GUIDE / COMMANDS as in-page doc tabs)
+├── bake_docs.py           # Re-embed the bundled docs after editing them:
+│                          # `python -m chemtreat_water_leads_viewer.bake_docs`
+└── markdown/RATIONALE.md  # Viewer design notes & gap list
+
+../chemtreat_sales_briefings/    # LLM-drafted regional briefings — downstream
+├── __init__.py                  # consumer of snapshot.sqlite (read-only).
+├── briefings.py                 # OpenAI/Azure tool-use loop + email send + CLI
+├── state.py                     # briefings_state.sqlite — which leads briefed
+├── regions.py                   #   when, plus the candidate gating predicate
+├── naics.py                     # NAICS code → human industry name lookup
+├── README.md                    # Briefings architecture + run instructions
+└── .env.example                 # Template for OPENAI_API_KEY / SMTP / Azure
 ```
 
 Tests live at `EPA/tests/`. Run with:
@@ -3588,7 +3598,7 @@ Excel without parsing the score-reasons string:
 | `tag_lead_copper` | bool | Active Lead/Copper Rule violation or facility-level Pb/Cu flag. |
 | `tag_major_facility` | bool | NPDES "Major" permit (high flow / high load — CWA only). |
 | `tag_only_resolved_events` | bool | Has drilled events, all Resolved/Archived. Sales should verify or skip. |
-| `tag_treatable_permit` | bool | NPDES permit covers a ChemTreat-treatable parameter class (phosphorus / ammonia / TSS / BOD / oil-grease / metals / cyanide / chlorine residual). Pre-violation signal — bulk-only. |
+| `tag_treatable_permit` | bool | NPDES permit covers a ChemTreat-treatable parameter class (phosphorus / ammonia / TSS / BOD / oil-grease / metals / cyanide / chlorine residual / microbiological). Pre-violation signal — bulk-only. |
 | `tag_discharges_to_impaired` | bool | Outfall is upstream of a 303(d)-listed impaired waterbody. Bulk-only. |
 | `tag_impairment_parameter_match` | bool | Facility's monitored effluent parameter matches a documented cause of the downstream impairment. Strongest pre-violation signal. Bulk-only. |
 | `tag_recent_exceedance` | bool | Has at least one DMR exceedance in the loaded fiscal-year archive. Bulk-only. |
@@ -3610,7 +3620,7 @@ Pre-violation columns (bulk-only):
 | Column | Type | Use |
 |---|---|---|
 | `permitted_parameters_text` | string | Pipe-joined sample of treatable parameter descriptions on the permit. |
-| `permit_has_*` | 0/1 | Per-class boolean (phosphorus / ammonia / TSS / BOD / oil-grease / metals / cyanide / chlorine residual). |
+| `permit_has_*` | 0/1 | Per-class boolean (phosphorus / ammonia / TSS / BOD / oil-grease / metals / cyanide / chlorine residual / microbiological). |
 | `impairment_causes_text` | string | Pipe-joined union of impairment causes for waterbodies the outfall touches. |
 | `matching_impaired_parameters` | string | Monitored effluent parameters that match an impairment cause — populates the strongest pre-violation tag. |
 

@@ -299,7 +299,10 @@ current compliance. See EXTERNAL_DATA_STATUS.md "pre-violation"
 clarification for full framing:
 - Treatable permit parameter: 5/hit, cap 15 (rolled up from
   `npdes_limits.zip`; classes = phosphorus, ammonia, TSS, BOD,
-  oil/grease, metals incl. Fe/Mn, cyanide, chlorine residual)
+  oil/grease, metals incl. Fe/Mn, cyanide, chlorine residual,
+  microbiological — coliform / E. coli / Enterococci / fecal
+  indicators, added 2026-06-11 once biocide/disinfection
+  chemistry was confirmed in scope)
 - Discharges to 303(d)-impaired water: 10, or 15 if effluent
   parameter matches impairment cause (`npdes_attains_downloads.zip`)
 
