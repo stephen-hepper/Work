@@ -119,6 +119,11 @@ FAC_COLUMNS: dict[str, str] = {
     # niche. See bulk_loader._TREATABLE_PARAM_PATTERNS.
     "permit_has_cyanide":         "INTEGER",
     "permit_has_chlorine_residual": "INTEGER",
+    # Microbiological control (coliform, E. coli, enterococci, fecal
+    # indicators). Treated by ChemTreat's biocide / disinfection
+    # product line, so coliform exceedances belong in the treatable
+    # bucket. Added 2026-06-11.
+    "permit_has_microbiological": "INTEGER",
     "permitted_parameters_text":  "TEXT",  # pipe-joined sample (top ~10)
     # ATTAINS-NPDES catchment linkage (rolled up from
     # npdes_attains_downloads.zip / NPDES_ATTAINS_AU_SUMMARIES.csv).

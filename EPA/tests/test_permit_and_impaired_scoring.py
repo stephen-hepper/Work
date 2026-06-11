@@ -89,7 +89,7 @@ class TestTreatableParameterRule(unittest.TestCase):
         author to look at the cap. Bump the count if you add a class;
         review the cap math in the same change."""
         f = {col: 1 for col in scoring.PERMIT_HAS_COLS}
-        self.assertEqual(len(scoring.PERMIT_HAS_COLS), 8,
+        self.assertEqual(len(scoring.PERMIT_HAS_COLS), 9,
             msg="PERMIT_HAS_COLS count changed — re-review the +15 cap "
                 "in rule_treatable_permit_parameter and update this "
                 "assertion deliberately.")

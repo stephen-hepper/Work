@@ -63,6 +63,17 @@ class TestClassifyParameter(unittest.TestCase):
             ("Cyanide, free available", "cyanide"),
             ("Cyanide, weak acid, dissociable", "cyanide"),
             ("Cyanide, free [amenable to chlorination]", "cyanide"),
+            # Microbiological added 2026-06-11. ChemTreat sells
+            # biocide / disinfection chemistry, so coliform / E. coli
+            # / enterococci exceedances belong in the treatable bucket
+            # alongside BOD and metals. EPA's wording is highly
+            # variable; the patterns catch the common forms.
+            ("Coliform, fecal general", "microbiological"),
+            ("Fecal coliform", "microbiological"),
+            ("E. coli", "microbiological"),
+            ("Escherichia coli", "microbiological"),
+            ("Enterococci", "microbiological"),
+            ("Enterococcus", "microbiological"),
         ]
         for desc, expected in cases:
             with self.subTest(desc=desc):
@@ -79,10 +90,13 @@ class TestClassifyParameter(unittest.TestCase):
             "Flow, in conduit or thru treatment plant",
             "Rainfall",
             "Temperature, water deg. centigrade",
-            "Coliform, fecal general",  # bacterial, not chemistry-treatable
-            "E. coli",
             "Oxygen, dissolved [DO]",
             "Specific conductance",
+            # Note: coliform / E. coli / Enterococci were here as
+            # "bacterial, not chemistry-treatable" — moved to the
+            # positive cases above 2026-06-11 once ChemTreat's
+            # biocide / disinfection product line was confirmed in
+            # scope.
         ]
         for desc in non_treatable:
             with self.subTest(desc=desc):

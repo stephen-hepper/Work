@@ -244,6 +244,7 @@ PERMIT_HAS_COLS = (
     "permit_has_metals",
     "permit_has_cyanide",
     "permit_has_chlorine_residual",
+    "permit_has_microbiological",
 )
 
 

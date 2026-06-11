@@ -616,6 +616,19 @@ _TREATABLE_PARAM_PATTERNS: dict[str, tuple[str, ...]] = {
     "cyanide":          ("CYANIDE",),
     "chlorine_residual": ("CHLORINE, TOTAL RESIDUAL",
                           "TOTAL RESIDUAL CHLORINE"),
+    # Microbiological control. ChemTreat explicitly includes microbial
+    # treatment (biocides, disinfection chemistry) as a product line,
+    # so coliform / E. coli / Enterococci / fecal-indicator exceedances
+    # ARE a sales angle — they belong in the treatable bucket alongside
+    # BOD and metals, not in "worst-exceedance-but-can't-help" territory.
+    # EPA's wording is highly variable: "Coliform, fecal general",
+    # "Fecal coliform", "E. coli" / "Escherichia coli", "Enterococci"
+    # / "Enterococcus". "E. COLI" needs the period because EPA never
+    # writes "ECOLI". "ENTEROCOCC" catches both singular and plural.
+    # "FECAL" alone is safe — any EPA pollutant prefixed "fecal" is a
+    # microbial indicator.
+    "microbiological":  ("COLIFORM", "E. COLI", "ESCHERICHIA",
+                          "ENTEROCOCC", "FECAL", "PATHOGEN"),
 }
 
 
