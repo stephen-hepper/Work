@@ -79,13 +79,38 @@ def _open_write(state_path: Path):
         conn.close()
 
 
-# Columns we project from `facilities` into the candidate result. Same
-# shape as the legacy `_LEAD_LIST_COLUMNS` minus the long score_reasons
-# string (left in for the LLM's framing, kept short to control payload).
+# Columns we project from `facilities` into the candidate result.
+#
+# Intentionally broad: the briefing is the LLM's main consumer of this
+# row and the alternative — having the model call `lead_detail` per
+# feature to get specifics — costs more tokens and latency for no
+# additional information that wasn't already on the row. Cheap reads
+# beat round-trips.
+#
+# Each group below maps to a different layer of "why this is a lead":
 _CANDIDATE_FAC_COLS = (
+    # Identity / context
     "f.registry_id", "f.program", "f.company", "f.city", "f.state",
-    "f.naics", "f.lead_score", "f.outreach_posture", "f.score_reasons",
+    "f.naics", "f.sic", "f.echo_url",
+    # Score + posture
+    "f.lead_score", "f.outreach_posture", "f.score_reasons",
     "f.last_seen",
+    # Compliance snapshot — concrete numbers for the prose
+    "f.snc_status", "f.violation_status",
+    "f.quarters_in_violation", "f.quarters_in_snc",
+    "f.formal_actions_5yr", "f.total_penalties_usd",
+    "f.last_penalty_date", "f.last_inspection_days_ago",
+    # Pre-violation signals — "permit covers our chemistry"
+    "f.permitted_parameters_text",
+    "f.matching_impaired_parameters", "f.impairment_causes_text",
+    # Active-compliance signals — what they're currently exceeding
+    "f.top_exceeded_parameter", "f.top_exceedance_pct",
+    "f.exceeded_treatable_parameters_text",
+    "f.recent_dmr_exceedances_count",
+    # SDWA context (NULL on CWA leads)
+    "f.population_served", "f.system_type", "f.owner_type",
+    "f.primary_source",
+    # Tags
     "f.tag_active_snc", "f.tag_treatment_technique", "f.tag_mcl_violation",
     "f.tag_lead_copper", "f.tag_chemtreat_high_relevance",
     "f.tag_exceeds_treatable_parameter", "f.tag_treatable_permit",
