@@ -622,11 +622,13 @@ def build_user_prompt(region: str, today: str) -> str:
 
 # ----------------------------------------------------------- LLM loop
 
-def run_one_region(client, deployment: str, region: str,
+def run_one_region(client, model: str, region: str,
                    ctx: dict) -> str:
     """Run the tool-use loop for one region. Returns the final briefing
-    text the model emitted. `ctx` is the runtime config dict — see
-    `tool_briefing_candidates` for what it contains."""
+    text the model emitted. `model` is either an Azure deployment
+    name or a direct-OpenAI model id — `client.chat.completions.create`
+    takes the same parameter name either way. `ctx` is the runtime
+    config dict — see `tool_briefing_candidates` for what it contains."""
     today = datetime.utcnow().strftime("%Y-%m-%d")
     messages: list[dict] = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -635,7 +637,7 @@ def run_one_region(client, deployment: str, region: str,
 
     for turn in range(MAX_TURNS):
         response = client.chat.completions.create(
-            model=deployment,
+            model=model,
             messages=messages,
             tools=TOOL_SCHEMAS,
             temperature=0.3,
@@ -690,16 +692,64 @@ def send_email(msg: EmailMessage) -> None:
 
 # ----------------------------------------------------------- CLI / main
 
-def _build_client():
-    """Construct the Azure OpenAI client. Fails loudly if env is unset
-    so a missing credential never silently becomes a no-op."""
+def _load_dotenv(path: Path = Path(".env")) -> None:
+    """Tiny `.env` loader. Reads KEY=VALUE lines, skips blanks and
+    comments, sets env vars that aren't already set. Shell-exported
+    vars always win — `.env` only fills in missing ones.
+
+    Quoted values get their surrounding quotes stripped so a key like
+    `OPENAI_API_KEY="sk-..."` works the same as the unquoted form.
+    Intentionally minimal: no variable expansion, no multi-line
+    values, no escape sequences. If you need any of that, add
+    python-dotenv to deps and swap this out.
+    """
+    if not path.exists():
+        return
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if (value.startswith('"') and value.endswith('"')) or \
+           (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+def _build_client(direct_openai: bool):
+    """Construct an OpenAI-compatible chat client.
+
+    `direct_openai=True` routes to api.openai.com using a personal
+    `OPENAI_API_KEY` — the quick-test path so you can validate the
+    flow without an Azure deployment in place. Returns whatever the
+    `openai` SDK gives back; chat.completions.create with tools is
+    shape-identical between the two clients, so nothing downstream
+    has to care which one fired.
+
+    `direct_openai=False` is the production path against the org's
+    Azure OpenAI deployment.
+    """
     try:
-        from openai import AzureOpenAI
+        from openai import AzureOpenAI, OpenAI
     except ImportError:
         sys.exit(
             "openai package not installed. Add it to the workspace venv:\n"
             "  cd ~/PycharmProjects/Work && uv add openai"
         )
+
+    if direct_openai:
+        if not os.environ.get("OPENAI_API_KEY"):
+            sys.exit(
+                "--openai-direct requires OPENAI_API_KEY in env or .env. "
+                "See README.md 'Quick test with a personal OpenAI key'."
+            )
+        kwargs = {"api_key": os.environ["OPENAI_API_KEY"]}
+        if os.environ.get("OPENAI_BASE_URL"):
+            kwargs["base_url"] = os.environ["OPENAI_BASE_URL"]
+        return OpenAI(**kwargs)
+
     missing = [k for k in
                ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT",
                 "AZURE_OPENAI_DEPLOYMENT")
@@ -711,6 +761,19 @@ def _build_client():
         azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
         api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2024-10-21"),
     )
+
+
+def _resolve_model(direct_openai: bool) -> str:
+    """Which model to pass to chat.completions.create.
+
+    Azure uses the deployment name (set during provisioning); direct
+    OpenAI uses a model id like `gpt-4o-mini`. Default the direct path
+    to `gpt-4o-mini` — capable enough for this task and cheap enough
+    to iterate on tone freely.
+    """
+    if direct_openai:
+        return os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+    return os.environ["AZURE_OPENAI_DEPLOYMENT"]
 
 
 def main() -> None:
@@ -745,7 +808,20 @@ def main() -> None:
                    help="Ignore the candidate filter — return top "
                         "leads by score regardless of briefing "
                         "history. For testing the gating logic.")
+    p.add_argument("--openai-direct", action="store_true",
+                   help="Use api.openai.com directly with OPENAI_API_KEY "
+                        "instead of Azure. Quick-test path for "
+                        "validating the flow before Azure provisioning. "
+                        "Reads OPENAI_API_KEY (required) and "
+                        "OPENAI_MODEL (default gpt-4o-mini) from env "
+                        "or .env. See README.md.")
     p.add_argument("-v", "--verbose", action="store_true")
+
+    # Load .env BEFORE arg parsing's validation chain — keys can come
+    # from the file too. argparse itself doesn't read env; this just
+    # populates os.environ so the downstream credential checks see it.
+    _load_dotenv()
+
     args = p.parse_args()
 
     logging.basicConfig(
@@ -777,8 +853,11 @@ def main() -> None:
         if missing:
             sys.exit(f"--send requires env: {', '.join(missing)}")
 
-    client = _build_client()
-    deployment = os.environ["AZURE_OPENAI_DEPLOYMENT"]
+    client = _build_client(args.openai_direct)
+    model = _resolve_model(args.openai_direct)
+    log.info("Using %s model: %s",
+             "OpenAI (direct)" if args.openai_direct else "Azure OpenAI",
+             model)
     today = datetime.utcnow().strftime("%Y-%m-%d")
 
     # candidates_tracker collects the candidate set the LLM saw, per
@@ -795,7 +874,7 @@ def main() -> None:
             "force_rebrief": args.force_rebrief,
             "candidates_tracker": candidates_tracker,
         }
-        body = run_one_region(client, deployment, region, ctx)
+        body = run_one_region(client, model, region, ctx)
         msg = render_email(region, body, today)
 
         if args.send:

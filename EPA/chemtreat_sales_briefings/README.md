@@ -81,7 +81,36 @@ consumer shows up, split `briefings.py` into `tools.py` + `llm.py` +
 
 ---
 
-## Running it
+## Quick test with a personal OpenAI key
+
+Before Azure is provisioned, you can validate the whole flow against
+api.openai.com with a personal key. Copy `.env.example` to `EPA/.env`,
+fill in `OPENAI_API_KEY`, and pass `--openai-direct`:
+
+```bash
+cd ~/PycharmProjects/Work/EPA
+cp chemtreat_sales_briefings/.env.example .env
+# edit .env, paste your sk-... key into OPENAI_API_KEY
+
+../.venv/bin/python -m chemtreat_sales_briefings.briefings \
+    --openai-direct --regions Gulf -v
+```
+
+That produces a one-region dry-run briefing using `gpt-4o-mini`
+(override with `OPENAI_MODEL=gpt-4o` in `.env` if you want stronger
+prose). The same tool surface and prompts as the Azure path — the
+only thing that changes is the transport. `EPA/.env` is gitignored;
+shell-exported env vars still take precedence so you can also just
+`export OPENAI_API_KEY=...` and skip the file.
+
+Cost ballpark with `gpt-4o-mini`: a one-region dry-run is typically
+a few cents at current pricing. Five regions ≈ $0.10-$0.30 depending
+on how much tool data the model pulls. Cheap enough to iterate on
+tone freely.
+
+---
+
+## Running it (Azure — the production path)
 
 The CLI defaults to **dry-run** — every region's briefing prints to
 stdout, no emails sent. This is the safe iteration mode.

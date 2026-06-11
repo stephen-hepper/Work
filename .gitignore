@@ -23,3 +23,10 @@ EPA/cache/
 **/echo_exporter.zip
 **/npdes_downloads.zip
 **/SDWA_latest_downloads.zip
+
+# Briefings state — operational, not source of truth
+EPA/briefings_state.sqlite
+
+# Secrets — never commit. .env.example is fine to track.
+.env
+**/.env
