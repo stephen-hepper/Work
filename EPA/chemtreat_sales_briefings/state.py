@@ -22,6 +22,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+from . import naics
+
 
 # Score-drift threshold for the "score_changed" candidate predicate.
 # A lead the LLM already briefed re-enters the candidate set when its
@@ -193,6 +195,15 @@ def candidates_for_states(
     try:
         conn.execute(f"ATTACH DATABASE '{state_uri}' AS briefings_state")
         rows = conn.execute(sql, binds).fetchall()
+        # Fetch top-3 recent events for the candidate set on the same
+        # open connection. One query for all candidates is cheaper than
+        # N round-trips and the LLM gets the dates baked into the row.
+        candidate_keys = [
+            (r["registry_id"], r["program"]) for r in rows
+            if r["registry_id"] and r["program"]
+        ]
+        events_by_key = _recent_events_for_candidates(
+            conn, candidate_keys, per_lead_limit=3)
     finally:
         conn.close()
 
@@ -208,7 +219,84 @@ def candidates_for_states(
         # LLM context. last_featured_at stays for new_activity context.
         if "lead_score_at_brief" in d:
             d["prior_lead_score"] = d.pop("lead_score_at_brief")
+        # Human-readable industry name from the NAICS code, when known.
+        if d.get("naics"):
+            label = naics.naics_label(d["naics"])
+            if label:
+                d["industry"] = label
+        # Most-recent 3 violation events for this lead, when present.
+        # The LLM uses these to ground prose in specific dates rather
+        # than aggregate counts.
+        key = (d.get("registry_id"), d.get("program"))
+        events = events_by_key.get(key)
+        if events:
+            d["recent_events"] = events
         out.append(d)
+    return out
+
+
+# Event columns the LLM finds useful in the briefing — a subset of
+# `violations` keeping the per-event payload short. CWA events carry
+# parameter / dmr_value / exceedance_pct; SDWA events carry
+# violation_category / contaminant / status. Both shapes coexist on
+# the same column list — null fields drop out.
+_RECENT_EVENT_COLS = (
+    "violation_id", "violation_category", "violation_description",
+    "contaminant", "rule_family", "parameter",
+    "dmr_value", "limit_value", "exceedance_pct",
+    "period_begin", "period_end", "status",
+)
+
+
+def _recent_events_for_candidates(
+    conn: sqlite3.Connection,
+    keys: list[tuple[str, str]],
+    per_lead_limit: int = 3,
+) -> dict[tuple[str, str], list[dict]]:
+    """Return `{(registry_id, program): [up to N events]}`.
+
+    Pulls events for all candidates in one query, sorted by
+    `period_end DESC NULLS LAST`, then groups in Python keeping the
+    top N per `(registry_id, program)`. Single round-trip beats one
+    query per candidate, and the LLM never has to call
+    `violation_events` separately for the lead it's about to feature.
+    """
+    if not keys:
+        return {}
+    reg_ids = list({k[0] for k in keys if k[0]})
+    if not reg_ids:
+        return {}
+    placeholders = ",".join("?" * len(reg_ids))
+    cols = ", ".join(("registry_id", "program", *_RECENT_EVENT_COLS))
+    # period_end is stored as US m/d/yyyy (e.g. "03/31/2026"), so a
+    # plain `ORDER BY period_end DESC` sorts lexically and puts
+    # "12/31/2020" ahead of "03/31/2026". Extract year / month / day
+    # via substr and sort on those — gives true date order without
+    # touching the pipeline-side format. Assumes 10-char zero-padded
+    # m/d/yyyy, which the pipeline produces consistently across both
+    # bulk NPDES events and the DMR archive feed.
+    sql = (
+        f"SELECT {cols} FROM violations "
+        f"WHERE registry_id IN ({placeholders}) "
+        f"ORDER BY period_end IS NULL, "
+        f"         substr(period_end, -4) DESC, "
+        f"         substr(period_end, 1, 2) DESC, "
+        f"         substr(period_end, 4, 2) DESC"
+    )
+    rows = conn.execute(sql, reg_ids).fetchall()
+
+    wanted = set(keys)
+    out: dict[tuple[str, str], list[dict]] = {}
+    for r in rows:
+        key = (r["registry_id"], r["program"])
+        if key not in wanted:
+            continue
+        bucket = out.setdefault(key, [])
+        if len(bucket) >= per_lead_limit:
+            continue
+        bucket.append({
+            k: r[k] for k in _RECENT_EVENT_COLS if r[k] is not None
+        })
     return out
 
 

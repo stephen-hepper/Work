@@ -588,28 +588,52 @@ The briefing should:
        signals; mention what's new
 
 3. For EACH featured lead, write a short detail block — not a single
-   bullet, not a paragraph. Aim for ~3-5 sentences that give the rep
+   bullet, not a paragraph. Aim for ~4-6 sentences that give the rep
    enough to walk into the conversation prepared. Pull from the row
    data directly:
 
-     **Company name (city, state, score [Δ if score_changed])**
+     **Company name (city, state, score [Δ if score_changed])** — *industry*
        - **What's wrong:** specific compliance picture. Cite the
          numbers: "11 quarters in non-compliance, 3 formal actions
-         over 5 years, $35K penalty in Aug 2025." Don't say "multiple
-         issues" when you have counts.
+         over 5 years, $35K penalty on 2025-08-14." Always cite the
+         `last_penalty_date` when you mention a penalty amount — date
+         matters as much as size for whether the situation is fresh.
+         Don't say "multiple issues" when you have counts.
+       - **Recent activity:** when `recent_events` is on the row, cite
+         the 2-3 most recent by date: "2026-03 BOD exceedance 50%
+         over limit, 2026-01 BOD 48% over." Specific event dates
+         ground the briefing in reality vs. abstract counts. If only
+         one event date is available, cite the one.
        - **The angle:** why this is a *ChemTreat* lead specifically.
-         Name the parameter(s). If `exceeded_treatable_parameters_text`
-         is set, cite it ("currently exceeding BOD by 50%, and their
-         permit explicitly covers BOD"). If
-         `matching_impaired_parameters` is set, that's the strongest
+         The authoritative field is `exceeded_treatable_parameters_text`
+         — those are parameters they're currently exceeding AND that
+         ChemTreat treats. Cite them ("currently exceeding BOD by 50%,
+         and their permit explicitly covers BOD").
+
+         **Worst-vs-treatable check:** if `top_exceeded_parameter` is
+         NOT one of the values listed in
+         `exceeded_treatable_parameters_text`, surface BOTH explicitly:
+         "Their worst single exceedance was X (e.g. Whole Effluent
+         Toxicity, which our chemistry doesn't directly address), but
+         the ChemTreat angle is Y — they're also exceeding ammonia by
+         180% and their permit covers ammonia." Don't lead with the
+         worst exceedance if it's not in our chemistry — it sets up
+         the wrong conversation.
+
+         If `matching_impaired_parameters` is set, that's the strongest
          angle ("their monitored BOD is documented as a cause of the
          downstream waterbody's impairment — regulator attention is
-         already there"). If only `permitted_parameters_text` is set
-         and no exceedance yet, frame as account-research ("permit
-         covers phosphorus and ammonia — at next renewal these limits
-         tighten").
+         already there, next permit renewal will tighten"). If only
+         `permitted_parameters_text` is set and no exceedance yet,
+         frame as account-research ("permit covers phosphorus and
+         ammonia — at next renewal these limits tighten").
        - **Verify on ECHO:** include the `echo_url` so the rep can
          spot-check before outreach.
+
+   Use the `industry` field when present — "Fluid Milk Manufacturing"
+   reads as a real lead; "NAICS 311511" reads as a database row. If
+   `industry` is missing, leave the slot empty rather than printing
+   the bare code.
 
    Skip any field that's empty — don't write "No data available";
    just omit it. The reader will see what's there is what matters.
