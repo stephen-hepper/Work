@@ -19,6 +19,13 @@ EPA/snapshot.sqlite
 EPA/out/
 EPA/cache/
 
+# dump_run output — pure cache of snapshot.sqlite, rebuildable any time via
+# `python -m chemtreat_water_leads.dump_run --latest`
+EPA/materialized/
+
+# Viewer screenshots — kept locally for reference, not source-controlled
+EPA/chemtreat_water_leads_viewer/images/Screenshot*.png
+
 # Bulk-loader cache (large ECHO ZIPs)
 **/echo_exporter.zip
 **/npdes_downloads.zip
