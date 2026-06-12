@@ -741,15 +741,14 @@ def _run_inner(states: list[str], out_dir: Path, db_path: Path,
     # Re-sort: event-aware scoring may have shuffled the top.
     leads.sort(key=lambda r: r["lead_score"], reverse=True)
 
-    # ---- 3. Persist to DB + write standing-state CSVs from DB ---------
+    # ---- 3. Persist to DB ---------------------------------------------
     #
-    # `snapshot.sqlite` is the source of truth: every column the CSV
-    # publishes lives in the DB. We capture one timestamp BEFORE any
-    # upsert and pass it to all three writers so the dump's
-    # `last_seen >= run_start_ts` filter catches every row this run
-    # touched (no microsecond drift between independent utcnow() calls).
+    # snapshot.sqlite is the source of truth. The standing-inventory
+    # CSVs and the new_* diff CSVs are now materialized on demand by
+    # `python -m chemtreat_water_leads.dump_run` rather than written
+    # every run; only newly_snc_*.csv (needs the prior snc_flag) and
+    # run_health.json (run-time warnings) land inline.
     run_start_ts = datetime.utcnow().isoformat(timespec="seconds")
-    # Per-run folder so this run's CSVs don't overwrite a prior run's.
     run_dir = _run_output_dir(out_dir, "pipeline", states, run_start_ts)
     with snapshot.open_db(db_path) as conn:
         # record_run first so its returned run_id can be threaded through
@@ -762,16 +761,8 @@ def _run_inner(states: list[str], out_dir: Path, db_path: Path,
             conn, leads, run_id, now=run_start_ts)
         viol_diff = snapshot.diff_and_upsert_violations(
             conn, events, run_id, now=run_start_ts)
-        # ---- 4. Write outputs -----------------------------------------
-        today = datetime.utcnow().strftime("%Y%m%d")
-        _write_lag_notice(run_dir)
-        snapshot.dump_facilities_csv(conn, run_dir / "all_leads.csv", run_start_ts)
-        snapshot.dump_violations_csv(conn, run_dir / "violation_events.csv", run_start_ts)
-    # Delta CSVs come from in-memory diff dicts — they describe what
-    # CHANGED this run, which only the diff functions know.
-    _write_csv(run_dir / f"new_facilities_{today}.csv", fac_diff["new"])
+    today = datetime.utcnow().strftime("%Y%m%d")
     _write_csv(run_dir / f"newly_snc_{today}.csv", fac_diff["newly_snc"])
-    _write_csv(run_dir / f"new_violations_{today}.csv", viol_diff["new"])
 
     health_path = _health.write_run_health(
         run_dir,
@@ -793,8 +784,11 @@ def _run_inner(states: list[str], out_dir: Path, db_path: Path,
     log.info("Done. %d new facilities, %d newly SNC, %d new violation events.",
              len(fac_diff["new"]), len(fac_diff["newly_snc"]),
              len(viol_diff["new"]))
-    log.info("Run outputs in %s — upload all_leads.csv, violation_events.csv, "
-             "and run_health.json from there.", run_dir)
+    log.info("Run %d outputs in %s (run_health.json, newly_snc_*.csv). "
+             "To materialize all_leads.csv + violation_events.csv for the "
+             "viewer, run:  python -m chemtreat_water_leads.dump_run "
+             "--db %s --run-id %d --out ./materialized/run_%d",
+             run_id, run_dir, db_path, run_id, run_id)
     print(LAG_BANNER)   # remind them again at the end
 
 

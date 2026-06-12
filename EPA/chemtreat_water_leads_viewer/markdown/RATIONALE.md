@@ -20,18 +20,25 @@ out.
 
 ---
 
-## Where the CSVs come from (as of 2026-05-23)
+## Where the CSVs come from
 
-`all_leads.csv` and `violation_events.csv` are produced by SELECTing
-from `../snapshot.sqlite` at end of every run, not by writing
-in-memory state to disk. The DB is the single source of truth; the
-CSVs are a viewer-shaped view of it. Implications for this viewer:
+`all_leads.csv` and `violation_events.csv` are materialized on demand
+from `../snapshot.sqlite` via
+`python -m chemtreat_water_leads.dump_run --latest --out <dir>` (or
+`--run-id N`). The runs themselves no longer write these CSVs inline
+— only `run_health.json` and `newly_snc_*.csv` (irrecoverable
+artifacts) land in the per-run folder. See the parent project's
+RATIONALE.md "Per-run output folders" for the full reasoning.
+
+The DB is the single source of truth; the CSVs the viewer eats are
+viewer-shaped views of it, materialized on demand. Implications for
+this viewer:
 
 - **Column shape is locked** to the explicit `FAC_CSV_COLUMNS` /
   `VIOL_CSV_COLUMNS` lists in `snapshot.py`, not to whatever Python
-  dict the previous pipeline run happened to assemble. So the
-  viewer's column references (in `setLeads`, `renderDetail`, upload
-  detection) are now contractual.
+  dict any given run happened to assemble. So the viewer's column
+  references (in `setLeads`, `renderDetail`, upload detection) are
+  contractual against those lists.
 - **`violation_events.csv` always carries the union of CWA + SDWA
   columns** even when only one program produced events this run.
   The viewer's `renderEvents()` already picks the right title via
@@ -50,20 +57,18 @@ CSVs are a viewer-shaped view of it. Implications for this viewer:
 ### Both producers — API pipeline AND bulk loader — write the same shape
 
 `pipeline.py` (per-state API path) and `bulk_loader.py` (nationwide
-weekly CSV-download path) both go through `snapshot.dump_*_csv()`,
-so the viewer renders the output of either one identically. As of
-2026-05-23 the bulk loader also runs the same phase-2 augmentation
-(re-score with events, compute `outreach_posture`, compute
-`tag_*`) the API pipeline runs, and falls back to the API DFR for
-any high-value lead the bulk file missed. Sales gets full
-per-event drill-down detail from a single weekly `bulk_loader`
-run; no need to chase a follow-up API run.
+weekly CSV-download path) both write to the same `snapshot.sqlite`
+schema, and `dump_run` is the single path that emits CSVs from it —
+so the viewer renders the output of either one identically. The bulk
+loader runs the same phase-2 augmentation (re-score with events,
+compute `outreach_posture`, compute `tag_*`) the API pipeline runs,
+and falls back to the API DFR for any high-value lead the bulk file
+missed. Sales gets full per-event drill-down detail from a single
+weekly `bulk_loader` run; no need to chase a follow-up API run.
 
-If you upload a bulk-run CSV vs. an API-run CSV to this viewer, the
-detail panels (score breakdown, outreach posture, compliance
-snapshot, recent events) should look qualitatively the same. If
-they don't, the divergence is upstream in the pipeline's data
-flatten/normalize step, not in the viewer.
+If a `dump_run` materialization of a bulk-run looks different from
+the same of an API-run, the divergence is upstream in the pipeline's
+data flatten/normalize step, not in the viewer.
 
 ---
 
@@ -71,9 +76,9 @@ flatten/normalize step, not in the viewer.
 
 These come from `../chemtreat_water_leads/MEMORY.md` and `README.md`:
 
-1. **Reporting lag must be impossible to miss.** README.md surfaces it
-   in four places (console banner, `data_lag_note` column,
-   `READ_ME_FIRST.txt`, README section). The viewer is the **fifth**:
+1. **Reporting lag must be impossible to miss.** The parent project
+   surfaces it in three places (console banner, `data_lag_note` column
+   on every event row, README section). The viewer is the **fourth**:
    a sticky yellow banner at the top of the page that can't be
    dismissed.
 2. **Scores must remain explainable.** No ML, no obfuscation. Every
@@ -329,14 +334,14 @@ appears when health is loaded but nothing's flagged.
 
 **Status:** Open, future work.
 
-The pipeline writes `new_facilities_*.csv`, `newly_snc_*.csv`, and
-`new_violations_*.csv` — the daily delta files the README says are
-"what sales actually opens each morning." Today the viewer just
-loads `all_leads.csv` and shows everything; it doesn't visually
-distinguish new-since-last-run rows. The `newly_snc` flag in the seed
-data demonstrates how a "Newly SNC" badge would look.
+`dump_run` produces `new_facilities.csv` and `new_violations.csv`
+alongside the inventory CSVs, and the runs themselves emit
+`newly_snc_*.csv` inline. Today the viewer just loads `all_leads.csv`
+and shows everything; it doesn't visually distinguish new-since-last-run
+rows. The `newly_snc` flag in the seed data demonstrates how a "Newly
+SNC" badge would look.
 
-**Intended fix:** accept a `new_facilities_*.csv` upload alongside
+**Intended fix:** accept a `new_facilities.csv` upload alongside
 `all_leads.csv`, build a set of `registry_id` values from it, and
 flag matching rows in the table with a "NEW" badge plus a quick
 filter chip "Only new since last run."

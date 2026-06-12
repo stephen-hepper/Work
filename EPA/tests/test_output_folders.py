@@ -93,15 +93,27 @@ class TestBulkRunWritesToSubfolder(unittest.TestCase):
         self.assertEqual(len(run_dirs), 1)
         rd = run_dirs[0]
         self.assertRegex(rd.name, r"^bulk_TX_\d{8}-\d{6}$")
+        # Inline artifacts only — both irrecoverable from the DB:
+        #   run_health.json: captured run-time warnings + drilldown stats
+        #   newly_snc_*.csv: compares prior snc_flag which upsert overwrites
+        # (the file is skipped when the diff list is empty, so a first
+        # run from a clean DB legitimately produces zero of them — only
+        # assert presence-or-absence is correct, not exact-one.)
+        # The big CSVs (all_leads / violation_events / new_facilities /
+        # new_violations) are materialized on demand from snapshot.sqlite
+        # via the dump_run module — see RATIONALE.md.
+        self.assertTrue((rd / "run_health.json").exists())
+        # Things that USED to be written but no longer are.
         for fn in ("all_leads.csv", "violation_events.csv",
-                   "run_health.json", "READ_ME_FIRST.txt"):
-            self.assertTrue((rd / fn).exists(), f"missing {fn} in {rd.name}")
+                   "READ_ME_FIRST.txt"):
+            self.assertFalse(
+                (rd / fn).exists(),
+                f"{fn} should NOT be written inline — materialize via dump_run",
+            )
 
     def test_second_run_does_not_overwrite_first(self):
         # Control the run-start clock so two back-to-back runs land in
-        # distinct, second-resolution folders without a real sleep. Only
-        # bulk_loader's datetime is patched; pipeline._write_lag_notice
-        # uses its own import and keeps real time.
+        # distinct, second-resolution folders without a real sleep.
         with patch.object(bulk_loader, "_download_cached",
                           side_effect=lambda url, c, name: self.exporter_zip), \
              patch.object(bulk_loader, "datetime") as mock_dt:
@@ -119,9 +131,9 @@ class TestBulkRunWritesToSubfolder(unittest.TestCase):
             run_dirs,
             ["bulk_TX_20260527-090000", "bulk_TX_20260527-090001"],
         )
-        # Both folders kept their own all_leads.csv — first run not clobbered.
+        # Both folders kept their own run_health.json — first run not clobbered.
         for name in run_dirs:
-            self.assertTrue((self.out_dir / name / "all_leads.csv").exists())
+            self.assertTrue((self.out_dir / name / "run_health.json").exists())
 
 
 if __name__ == "__main__":

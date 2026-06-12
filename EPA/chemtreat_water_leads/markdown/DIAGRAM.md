@@ -53,41 +53,58 @@ on `include_events` and pinned by `tests/test_no_events_flag.py`.
 Every run writes into its **own subfolder** so runs never overwrite each
 other. The folder is named `<command>_<scope>_<YYYYMMDD-HHMMSS>`, where
 `scope` is the joined state list (or `nationwide` when there's no state
-filter):
+filter). Each folder is tiny (~100 KB) — only the artifacts that can't
+be reconstructed from `snapshot.sqlite` land inline:
 
 ```
 out/
 ├── bulk_nationwide_20260527-090000/      ← a nationwide bulk run
-│   ├── READ_ME_FIRST.txt          ← lag warning, always
-│   ├── all_leads.csv              ← every lead this run touched, ranked
-│   ├── violation_events.csv       ← every event tied to those leads
-│   ├── run_health.json            ← run metadata + warnings + signals
-│   ├── new_facilities_YYYYMMDD.csv    ← facilities first seen in THIS run
-│   ├── newly_snc_YYYYMMDD.csv         ← facilities that just crossed SNC
-│   └── new_violations_YYYYMMDD.csv    ← events first seen in THIS run
+│   ├── run_health.json                 ← run metadata + warnings + signals
+│   └── newly_snc_YYYYMMDD.csv          ← facilities that just crossed SNC
+│                                          (skipped when the diff is empty)
 └── pipeline_WA-AL-VA-LA-GA_20260527-121500/   ← a later targeted run
-    ├── all_leads.csv              ← those 5 states, with full DMR depth
     └── … (same file set)
 ```
 
-The folder is self-contained — nothing is written to `out/` root. A
-targeted `pipeline` run therefore can't clobber an earlier nationwide
-`bulk` run; both folders sit side by side. The DB
-(`snapshot.sqlite`) remains the cross-run source of truth; these
-folders are just per-run CSV snapshots dumped from it. The path is
-echoed at the end of each run.
+The big CSVs (`all_leads.csv`, `violation_events.csv`,
+`new_facilities.csv`, `new_violations.csv`) are pure views of the DB
+and are materialized on demand:
 
-**Upload to the viewer**: from the run folder you want to look at, pick
-`all_leads.csv`, `violation_events.csv`, and `run_health.json` together.
-The first two populate the Inventory tab; the JSON populates the Run
-Health tab with coverage gaps, depth gaps, run warnings, and suggested
-follow-up commands. (The viewer shows one run at a time — to compare a
-nationwide run with a targeted run, upload one, then the other.)
+```
+materialized/run_42/
+├── all_leads.csv              ← every lead the run touched, ranked
+├── violation_events.csv       ← every event tied to those leads
+├── new_facilities.csv         ← facilities first seen in THIS run
+└── new_violations.csv         ← events first seen in THIS run
+```
 
-On a first run from an empty DB, the three `new_*` files are
-essentially copies of `all_leads.csv` / `violation_events.csv` (no
-baseline to diff against). On a later run, they hold only the
-genuinely fresh rows since the previous run.
+via:
+
+```bash
+python -m chemtreat_water_leads.dump_run --db ./snapshot.sqlite \
+    --latest --out ./materialized/run_latest
+```
+
+The end-of-run log prints the exact command for the run that just
+finished. The folder is self-contained — nothing is written to `out/`
+root. A targeted `pipeline` run therefore can't clobber an earlier
+nationwide `bulk` run; both folders sit side by side. The DB
+(`snapshot.sqlite`) remains the cross-run source of truth; the inline
+files capture the moment-in-time state nobody else can rebuild, and
+the materialized files are pure DB views on demand.
+
+**Upload to the viewer**: materialize the run you want, then pick
+`all_leads.csv` and `violation_events.csv` from the materialized
+folder plus `run_health.json` from the original run folder. The first
+two populate the Inventory tab; the JSON populates the Run Health tab
+with coverage gaps, depth gaps, run warnings, and suggested follow-up
+commands. (The viewer shows one run at a time — to compare a
+nationwide run with a targeted run, materialize each separately and
+upload one, then the other.)
+
+On a first run from an empty DB, `new_facilities.csv` is essentially a
+copy of `all_leads.csv` (everything is new). On a later run, it holds
+only the genuinely fresh rows since the previous run.
 
 ---
 

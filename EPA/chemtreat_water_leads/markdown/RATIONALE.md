@@ -95,19 +95,24 @@ score≥50 threshold is unchanged — high-value leads always drill.
 ## `snapshot.sqlite` as source of truth
 
 **Decision.** Both `pipeline.run` and `bulk_loader.run_bulk` write
-through `snapshot.diff_and_upsert_*` and then dump `all_leads.csv` /
-`violation_events.csv` from the DB via `snapshot.dump_*_csv`. The
-CSVs are disposable views of "what this run touched"
-(`last_seen >= run_start_ts`). The DB never deletes — historical rows
-persist when they fall out of a run's territory.
+through `snapshot.diff_and_upsert_*` and stop there — `all_leads.csv` /
+`violation_events.csv` are materialized on demand from the DB by
+`chemtreat_water_leads.dump_run` (using `facilities_in_run` /
+`violations_in_run` against the per-run membership tables, then the
+same `FAC_CSV_COLUMNS` / `VIOL_CSV_COLUMNS` / `_coerce_for_csv`
+serialization the old inline writes used). The DB never deletes —
+historical rows persist when they fall out of a run's territory; the
+`runs` + `run_*_membership` tables let any past run be reconstructed
+exactly.
 
 **Why this matters.**
 - Diff baseline is durable across runs. Deleting the DB resets the
   "what's new today" view to "everything looks new again."
-- Each run's CSV snapshot is preserved in its own output folder (see
-  below), so a prior run's view is never lost — even when a later run
+- Each run's per-row membership is preserved in
+  `run_facility_membership` / `run_violation_membership`, so a prior
+  run's view can be materialized at any time — even when a later run
   covers different territory. The DB holds the full cross-run history;
-  each folder holds one run's slice of it.
+  `dump_run --run-id N` emits one run's slice of it.
 - The schema is single-sourced in `FAC_COLUMNS` / `VIOL_COLUMNS`
   ordered dicts — appending to one of those dicts adds the column to
   the DB schema, the CSV header, and the dump in one edit. No
@@ -130,30 +135,48 @@ persist when they fall out of a run's territory.
 
 ## Per-run output folders (runs don't overwrite each other)
 
-**Decision.** Each run writes its CSV snapshot, `run_health.json`, and
-`READ_ME_FIRST.txt` into a fresh subfolder of `--out`, named
-`<command>_<scope>_<YYYYMMDD-HHMMSS>` (e.g.
+**Decision.** Each run writes its irrecoverable artifacts —
+`run_health.json` and `newly_snc_*.csv` — into a fresh subfolder of
+`--out`, named `<command>_<scope>_<YYYYMMDD-HHMMSS>` (e.g.
 `bulk_nationwide_20260527-090000`, `pipeline_WA-AL-VA-LA-GA_20260527-121500`).
 `scope` is the joined state list or `nationwide`. Nothing is written to
 the `out/` root. Helper: `pipeline._run_output_dir`, called by both
 entry points just after `run_start_ts` is captured.
 
-**Why.** The CSVs are per-run snapshots dumped from the DB filtered to
-`last_seen >= run_start_ts`, i.e. only the territory that run touched.
-Writing them to fixed filenames in `out/` root meant a targeted
-`pipeline --states WA,AL,VA,LA,GA` run (used to add per-DMR depth to a
-handful of states) would overwrite the `all_leads.csv` from a prior
-nationwide `bulk` run — collapsing a 50-state inventory down to 5 states
-in the file the viewer loads. Per-run folders let both coexist: the
-nationwide baseline and the deep-dive sit side by side, and the user
-chooses which to upload.
+**What's in the folder (and why only these two).** snapshot.sqlite is
+the source of truth and the membership tables let any past run be
+reconstructed. The only artifacts the DB CAN'T reproduce stay inline:
+
+- `run_health.json` — captures run-time warnings (EPA bot-blocks,
+  throttle events, drill-down miss counts, gate stats). These are
+  observable only during the run; the DB doesn't store them.
+- `newly_snc_*.csv` — the delta between current and prior `snc_flag`.
+  The upsert overwrites `snc_flag`, so without a per-run `snc_status_history`
+  table (deliberately not added — see TODO) the transition is gone after
+  the run ends.
+
+**Materialize the rest on demand.** `all_leads.csv`,
+`violation_events.csv`, `new_facilities.csv`, and `new_violations.csv`
+are produced by `python -m chemtreat_water_leads.dump_run --run-id N
+--out X` (or `--latest`) reading from `snapshot.sqlite`. The end-of-run
+log prints the exact command. The materializer uses the same
+`FAC_CSV_COLUMNS` / `VIOL_CSV_COLUMNS` / `_coerce_for_csv` paths the
+old inline writes used, so the viewer's auto-detect doesn't care
+whether a CSV came from inline write or `dump_run`.
+
+**Why the change.** The inline CSVs were ~15-50 MB per run (mostly
+all_leads + violation_events) and a pure cache of the DB — every byte
+reconstructable. Dropping them shrinks per-run folders from ~50 MB to
+~100 KB, makes DB-as-source-of-truth explicit in the file layout, and
+sets up the Snowflake migration where the viewer will query the
+warehouse directly anyway. The cost is one extra command for the
+sales workflow (mitigated by the end-of-run log line that prints it).
 
 **Why not keep a `latest/` copy in `out/` root too.** Considered and
-declined — it reintroduces an overwrite target (the whole problem) and
-adds a second write path to keep consistent. The end-of-run log line
-prints the exact folder, so "where did my files go" is answered without
-a stable alias. The DB remains the single source of truth across runs;
-the folders are disposable views, now just namespaced by run.
+declined — it reintroduces an overwrite target and adds a second write
+path to keep consistent. The end-of-run log line prints both the run
+folder and the exact `dump_run` command, so "where did my files go"
+is answered without a stable alias.
 
 **Scope-name guard.** A state list long enough to make an unwieldy
 folder name (>40 chars, i.e. ~13+ states) collapses to `<N>states`.

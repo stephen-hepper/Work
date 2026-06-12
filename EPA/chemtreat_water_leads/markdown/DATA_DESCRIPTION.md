@@ -51,7 +51,7 @@ violation file selection" for why we don't read `NPDES_VIOLATION_ENFORCEMENTS.cs
 
 ---
 
-## Lag is surfaced in five places
+## Lag is surfaced in four places
 
 A "newly seen" SDWA violation in today's diff may actually have happened
 ~3 months ago and already been resolved on the ground. To make this hard
@@ -59,9 +59,8 @@ to miss for sales:
 
 1. **Console banner** printed at the start *and end* of every run.
 2. **`data_lag_note` column** on every event row in `violation_events.csv`.
-3. **`READ_ME_FIRST.txt`** dropped into every output folder.
-4. **README.md "Reporting lag" section** with the per-program lag breakdown.
-5. **Sticky yellow banner** at the top of the viewer page that can't be dismissed.
+3. **README.md "Reporting lag" section** with the per-program lag breakdown.
+4. **Sticky yellow banner** at the top of the viewer page that can't be dismissed.
 
 ---
 

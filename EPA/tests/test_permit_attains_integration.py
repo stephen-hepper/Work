@@ -26,7 +26,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from chemtreat_water_leads import bulk_loader
+from chemtreat_water_leads import bulk_loader, dump_run, snapshot
 from tests._fixtures import (
     make_attains_zip,
     make_dmr_zip,
@@ -151,10 +151,18 @@ class TestPermitAttainsIntegration(unittest.TestCase):
                 include_events=True,
             )
 
-        # Locate the run folder bulk_loader created.
+        # Locate the run folder bulk_loader created — used to confirm
+        # the run produced the inline artifacts only (run_health.json).
         run_dirs = [p for p in out_dir.iterdir() if p.is_dir()]
         self.assertEqual(len(run_dirs), 1)
-        leads_csv = run_dirs[0] / "all_leads.csv"
+        # bulk_loader no longer writes all_leads.csv inline (snapshot.sqlite
+        # is the source of truth; materialize on demand). Build it from
+        # the DB via dump_run, the same path sales would use.
+        materialize_dir = out_dir / "_materialized"
+        with snapshot.open_db(db_path) as conn:
+            run_id = dump_run.resolve_run_id(conn, run_id=None, latest=True)
+            dump_run.materialize_run(conn, run_id, materialize_dir)
+        leads_csv = materialize_dir / "all_leads.csv"
         self.assertTrue(leads_csv.exists())
 
         with leads_csv.open() as fh:
@@ -232,7 +240,8 @@ class TestPermitAttainsIntegration(unittest.TestCase):
         # was built to close. Both the treatable row AND the decoy
         # land (both are real exceedances; the decoy just doesn't
         # match a treatable class).
-        events_csv = run_dirs[0] / "violation_events.csv"
+        # Same path as all_leads.csv — materialized via dump_run.
+        events_csv = materialize_dir / "violation_events.csv"
         with events_csv.open() as fh:
             event_rows = list(csv.DictReader(fh))
         treatable_event = next(

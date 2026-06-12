@@ -130,21 +130,36 @@ the whole chain.
 
 ## What lands in `out/` after the run
 
+Each run gets its own subfolder (e.g.
+`out/bulk_nationwide_20260612-090000/`) so runs never overwrite each
+other. Inside the folder there are only TWO files:
+
 ```
-out/
-├── READ_ME_FIRST.txt              lag warning — read first
-├── all_leads.csv                  ← upload to viewer
-├── violation_events.csv           ← upload to viewer
+out/<run-folder>/
 ├── run_health.json                ← upload to viewer
-├── new_facilities_YYYYMMDD.csv    dated, "what's new today"
-├── newly_snc_YYYYMMDD.csv         dated, "newly Significant Non-Complier"
-└── new_violations_YYYYMMDD.csv    dated, "new events today"
+└── newly_snc_YYYYMMDD.csv         dated, "newly Significant Non-Complier"
+                                   (skipped if the diff is empty — common on first runs)
 ```
 
-The three files marked **upload to viewer** are the ones to drop into
-the viewer page. The dated `new_*` files are mostly empty on a first
-run since there's no prior baseline to diff against — they become
-useful on weekly re-runs.
+Everything else (`all_leads.csv`, `violation_events.csv`, the daily
+diffs) lives in `snapshot.sqlite` and is built on demand. The
+end-of-run log prints the exact command to materialize them; it looks
+like:
+
+```bash
+python -m chemtreat_water_leads.dump_run \
+    --db ./snapshot.sqlite --latest \
+    --out ./materialized/run_latest
+```
+
+That writes `all_leads.csv`, `violation_events.csv`,
+`new_facilities.csv`, and `new_violations.csv` into the target folder.
+The `new_*` files are mostly empty on a first run since there's no
+prior baseline to diff against — they become useful on weekly re-runs.
+
+**Why the split.** `snapshot.sqlite` is the source of truth; the big
+CSVs are pure views of it. Materializing on demand keeps the run
+folders tiny (~100 KB) and the DB the single canonical state.
 
 ---
 
@@ -183,15 +198,26 @@ run.
 
 ## Opening the viewer
 
-Open `chemtreat_water_leads_viewer/index.html` in any browser
+First materialize the CSVs the viewer eats — the bulk/pipeline runs
+only write `run_health.json` inline:
+
+```bash
+python -m chemtreat_water_leads.dump_run \
+    --db ./snapshot.sqlite --latest \
+    --out ./materialized/run_latest
+```
+
+Then open `chemtreat_water_leads_viewer/index.html` in any browser
 (Chrome, Safari, Firefox — no internet required).
 
 1. Click **Upload files** at the top right.
-2. Select **all three** files at once: `all_leads.csv`,
-   `violation_events.csv`, `run_health.json`. On Mac, cmd-click each
-   to select multiple in the file picker.
-3. The viewer auto-detects each file by its columns/schema. Pick
-   them in any order.
+2. Select **all three** files at once:
+   - `all_leads.csv` (from `./materialized/run_latest/`)
+   - `violation_events.csv` (from `./materialized/run_latest/`)
+   - `run_health.json` (from the original `out/<run-folder>/`)
+   On Mac, cmd-click each to select multiple in the file picker.
+3. The viewer auto-detects each file by its columns/schema. Pick them
+   in any order.
 
 You'll land on the Inventory tab by default. The Run Health tab is to
 its right.
@@ -294,10 +320,11 @@ the bulk files weekly, so the cache invalidates automatically:
     --out ./out --db ./snapshot.sqlite --cache ./cache
 ```
 
-This time the `new_*_YYYYMMDD.csv` files are the interesting ones —
-they hold only what changed since the prior run. The `all_leads.csv`,
-`violation_events.csv`, and `run_health.json` are rewritten with the
-current state; re-upload to the viewer the same way.
+This time the `new_*` files inside the materialized folder are the
+interesting ones — they hold only what changed since the prior run. Re-run
+`dump_run --latest --out ./materialized/run_latest` to refresh the
+materialized CSVs against the new run, grab the latest `run_health.json`
+from the new `out/<run-folder>/`, and upload to the viewer the same way.
 
 **Critical rule:** never delete `snapshot.sqlite`. It's the diff
 baseline. If you delete it, the next run treats every facility as

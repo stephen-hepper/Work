@@ -46,9 +46,11 @@ class TestSummarizeDrilldown(unittest.TestCase):
         self.assertEqual(out["attempted"], 5)
         self.assertEqual(out["with_events"], 2)      # R1, R4
         self.assertEqual(out["lookup_failed"], 2)    # R2, R5
+        self.assertEqual(out["gated_unactionable"], 0)  # no gate provided
         self.assertEqual(out["no_data"], 1)          # R3
         self.assertEqual(out["lookup_failed_by_state"], {"WA": 1, "GA": 1})
         self.assertEqual(out["lookup_failed_keys"], ["R2|CWA", "R5|SDWA"])
+        self.assertEqual(out["gated_unactionable_keys"], [])
 
     def test_failed_key_only_counts_if_still_missing(self):
         # A lead that's in failed_keys BUT ended up with events (a later
@@ -59,6 +61,49 @@ class TestSummarizeDrilldown(unittest.TestCase):
         out = _health.summarize_drilldown(leads, events, {("R1", "CWA")}, leads)
         self.assertEqual(out["with_events"], 1)
         self.assertEqual(out["lookup_failed"], 0)
+
+    def test_gated_split_out_of_no_data(self):
+        # R1 has events, R2 raised (failed), R3 came back empty (no_data),
+        # R4 and R5 were gated (un-actionable per the gate predicate). The
+        # gated set is a SUBSET of no_event; gated leads must land in the
+        # gated bucket, NOT in no_data — that's the whole point of the
+        # split (don't tell the user "no records on file" when we
+        # intentionally didn't ask).
+        leads = [
+            {"registry_id": "R1", "program": "CWA", "permit_id": "P1", "state": "WA"},
+            {"registry_id": "R2", "program": "CWA", "permit_id": "P2", "state": "WA"},
+            {"registry_id": "R3", "program": "CWA", "permit_id": "P3", "state": "VA"},
+            {"registry_id": "R4", "program": "CWA", "permit_id": "P4", "state": "KS"},
+            {"registry_id": "R5", "program": "CWA", "permit_id": "P5", "state": "NJ"},
+        ]
+        events = [{"registry_id": "R1", "program": "CWA"}]
+        failed = {("R2", "CWA")}
+        gated = {("R4", "CWA"), ("R5", "CWA")}
+
+        out = _health.summarize_drilldown(leads, events, failed, leads,
+                                          gated_keys=gated)
+
+        self.assertEqual(out["attempted"], 5)
+        self.assertEqual(out["with_events"], 1)         # R1
+        self.assertEqual(out["lookup_failed"], 1)       # R2
+        self.assertEqual(out["gated_unactionable"], 2)  # R4, R5
+        self.assertEqual(out["no_data"], 1)             # R3 only — not 3
+        self.assertEqual(out["gated_unactionable_keys"], ["R4|CWA", "R5|CWA"])
+
+    def test_failed_wins_over_gated(self):
+        # A key in BOTH failed_keys and gated_keys should land in
+        # lookup_failed — we asked EPA, EPA didn't answer, so the user
+        # still has actionable re-run information. The gate gets credit
+        # only for leads we successfully avoided asking.
+        leads = [
+            {"registry_id": "R1", "program": "CWA", "permit_id": "P1", "state": "WA"},
+        ]
+        out = _health.summarize_drilldown(
+            leads, [], {("R1", "CWA")}, leads,
+            gated_keys={("R1", "CWA")},
+        )
+        self.assertEqual(out["lookup_failed"], 1)
+        self.assertEqual(out["gated_unactionable"], 0)
 
 
 class TestDrillFailedTracking(unittest.TestCase):
@@ -145,18 +190,22 @@ class TestBulkEmitsBreakdown(unittest.TestCase):
         run_dirs = [p for p in out_dir.iterdir() if p.is_dir()]
         self.assertEqual(len(run_dirs), 1)
         health = json.loads((run_dirs[0] / "run_health.json").read_text())
-        self.assertEqual(health["schema_version"], 2)
+        self.assertEqual(health["schema_version"], 3)
         drill = health["drilldown"]
-        # New breakdown keys present...
-        for k in ("attempted", "with_events", "lookup_failed", "no_data",
-                  "lookup_failed_by_state", "lookup_failed_keys"):
+        # All v3 breakdown keys present...
+        for k in ("attempted", "with_events", "lookup_failed",
+                  "gated_unactionable", "no_data",
+                  "lookup_failed_by_state", "lookup_failed_keys",
+                  "gated_unactionable_keys"):
             self.assertIn(k, drill)
         # ...alongside the bulk-specific fine-comb stat.
         self.assertIn("candidates", drill)
-        # The lead had no events (drills no-op'd) and didn't raise -> no_data.
+        # The lead had no events (drills no-op'd), didn't raise, and didn't
+        # match the un-actionable gate predicate -> no_data.
         self.assertEqual(drill["attempted"], 1)
         self.assertEqual(drill["with_events"], 0)
         self.assertEqual(drill["lookup_failed"], 0)
+        self.assertEqual(drill["gated_unactionable"], 0)
         self.assertEqual(drill["no_data"], 1)
 
 

@@ -269,41 +269,62 @@ compare current state to the DB and emit four change sets:
 
 Score increases of >10 points are also tagged on the all-leads output.
 
-### Step 5–6 — Update DB, write CSVs
+### Step 5–6 — Update DB, write outputs
 
 Each run writes into its own subfolder of `--out`, named
 `<command>_<scope>_<YYYYMMDD-HHMMSS>` (e.g.
 `out/bulk_nationwide_20260527-090000/`), so runs never overwrite each
 other — a targeted `pipeline` run leaves a prior nationwide `bulk` run's
 files intact. The folder path is logged at the end of the run. See
-`RATIONALE.md` ("Per-run output folders") for why. Three primary outputs
-per run, inside that folder:
+`RATIONALE.md` ("Per-run output folders") for why.
 
-- `all_leads.csv` — full ranked inventory. Columns include the score
-  and breakdown, the `outreach_posture` string, the seven `tag_*`
-  booleans, normalized facility identity / location / NAICS, the SNC
-  text and dates, quarter counts, formal action counts, total
-  penalties, the 13-quarter compliance history, and an `echo_url`
-  pointing back at EPA's facility page.
-- `violation_events.csv` — the underlying DMR exceedances (CWA) and
-  per-violation rows from the SDWA DFR. Includes status, period dates,
-  the resolved date, federal/state MCL where applicable, and a
-  `data_lag_note` so a row read in isolation still carries the caveat.
-- `new_*.csv` — the daily changeset (`new_facilities`, `newly_snc`,
-  `new_violations`). This is what the sales team should actually look
-  at each morning — the standing inventory has dozens of inches of
-  scroll, the changeset is the few rows that matter today.
+`snapshot.sqlite` is the source of truth; the run folder holds only the
+artifacts that can't be reconstructed from the DB:
+
 - `run_health.json` — structured snapshot of the run (totals, drill-down
   stats, per-state coverage gaps, warnings). The viewer's Run Health
   tab consumes this to surface signals (terminal warnings, coverage
   gaps, suggested follow-up commands) to non-technical readers who
-  never look at the log. One per run folder.
+  never look at the log.
+- `newly_snc_YYYYMMDD.csv` — facilities that just crossed into
+  Significant Non-Complier. Needs the *prior* `snc_flag` value, which
+  the upsert overwrites — can't be reconstructed after the run.
+  Skipped if the diff is empty.
 
-A separate viewer at `../chemtreat_water_leads_viewer/index.html` is a
-single-page HTML app for browsing these CSVs. It reads
-`outreach_posture` directly and renders the status pills, "do not
-call" affordance, and filter chips off it. See
-`chemtreat_water_leads_viewer/RATIONALE.md` for design notes.
+The standing-inventory and diff CSVs are materialized on demand from
+the DB by `dump_run`:
+
+```bash
+python -m chemtreat_water_leads.dump_run --db ./snapshot.sqlite --latest \
+    --out ./materialized/run_latest
+# or pick a specific run:
+python -m chemtreat_water_leads.dump_run --db ./snapshot.sqlite --run-id 42 \
+    --out ./materialized/run_42
+# or list recent runs:
+python -m chemtreat_water_leads.dump_run --db ./snapshot.sqlite --list
+```
+
+That produces:
+
+- `all_leads.csv` — full ranked inventory. Columns include the score
+  and breakdown, the `outreach_posture` string, the `tag_*` booleans,
+  normalized facility identity / location / NAICS, the SNC text and
+  dates, quarter counts, formal action counts, total penalties, the
+  13-quarter compliance history, and an `echo_url`.
+- `violation_events.csv` — the underlying DMR exceedances (CWA) and
+  per-violation rows from the SDWA DFR. Includes status, period dates,
+  the resolved date, federal/state MCL where applicable, and a
+  `data_lag_note` so a row read in isolation still carries the caveat.
+- `new_facilities.csv` — facilities whose first-ever membership row is
+  in this run (i.e. brand-new to the inventory).
+- `new_violations.csv` — same first-appearance semantics for events.
+
+The end-of-run log prints the exact `dump_run` command for the run
+that just finished. A separate viewer at
+`../chemtreat_water_leads_viewer/index.html` is a single-page HTML
+app for browsing these materialized CSVs plus the inline
+`run_health.json`. See `chemtreat_water_leads_viewer/RATIONALE.md`
+for design notes.
 
 ---
 
@@ -331,7 +352,8 @@ To make this hard to miss, the lag is surfaced in **four places**:
 
 1. **Console banner** printed at the start and end of every run.
 2. **`data_lag_note` column** on every event row in the violation CSV.
-3. **`READ_ME_FIRST.txt`** written to the output directory each run.
+3. **Sticky yellow banner** at the top of the viewer page that can't
+   be dismissed.
 4. **This README section.**
 
 ## Other caveats — things to tell your team

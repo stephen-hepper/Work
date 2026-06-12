@@ -163,9 +163,12 @@ EPA data is NOT real-time:
 This is the single most important thing for sales to understand —
 otherwise reps will cold-call about "fresh" violations that resolved
 months ago. We surface the lag in **four places** (CLI banner,
-`data_lag_note` column on every event row, `READ_ME_FIRST.txt` in the
-output dir, README section). If you ever simplify this, keep at least
-two of the four. The duplication is on purpose.
+`data_lag_note` column on every event row, README section, sticky
+viewer banner). If you ever simplify this, keep at least two of the
+four. The duplication is on purpose. (The fifth place — a per-run
+`READ_ME_FIRST.txt` — was dropped when the run folder shrank to
+`run_health.json` + `newly_snc_*.csv` and the big CSVs moved to
+on-demand materialization via `dump_run`.)
 
 ### Trap 7: EPA bot-block returns HTTP 200 + Error envelope
 
@@ -607,14 +610,16 @@ the fine-comb block ran unconditionally — silent network leak.
 ### `out/run_health.json` — every run
 
 Added 2026-05-26. Both `bulk_loader.run_bulk` and `pipeline.run` write
-a JSON snapshot of the run at end-of-pipeline, alongside
-`all_leads.csv` / `violation_events.csv`. As of 2026-05-27 these land
-in a per-run subfolder (`out/<command>_<scope>_<YYYYMMDD-HHMMSS>/`) via
+a JSON snapshot of the run at end-of-pipeline. Lands in a per-run
+subfolder (`out/<command>_<scope>_<YYYYMMDD-HHMMSS>/`) via
 `pipeline._run_output_dir`, so runs no longer overwrite each other —
-see RATIONALE.md "Per-run output folders". The viewer's "Run Health"
-tab consumes it.
+see RATIONALE.md "Per-run output folders". Since the
+on-demand-materialization change (2026-06-12), `run_health.json` is
+one of only two artifacts that land inline (the other is
+`newly_snc_*.csv` — both irrecoverable from the DB). The viewer's
+"Run Health" tab consumes it.
 
-Contents (schema_version = 2 as of 2026-05-27; viewer accepts 1 and 2):
+Contents (schema_version = 3 as of 2026-06-12; viewer accepts 1, 2, and 3):
 
 - `generated_at`, `command`, `states_filter`, `include_events`
 - `totals` — leads (per program), events, new_facilities, newly_snc,
@@ -694,21 +699,25 @@ Pinned by `tests/test_drilldown_health.py`.
 `snapshot.sqlite` is **the source of truth** for everything the CSVs
 publish. Two roles, one file:
 
-1. **Diff engine.** Each run compares current state to the DB and
-   emits `new_facilities_*.csv`, `newly_snc_*.csv`,
-   `new_violations_*.csv` — the deltas sales opens each morning.
+1. **Diff engine.** Each run compares current state to the DB. The
+   only delta CSV that writes inline is `newly_snc_*.csv` (the prior
+   `snc_flag` is gone after upsert — irrecoverable). The other two
+   diffs (`new_facilities.csv`, `new_violations.csv`) are produced by
+   `dump_run` from the `run_*_membership` tables: a row's first-ever
+   appearance is the run where it was new (`MIN(run_id) = ?`).
 2. **Standing inventory.** Every column in `all_leads.csv` and
-   `violation_events.csv` lives in the DB. At end of run, those two
-   CSVs are produced by SELECTing from the DB (filtered to rows whose
-   `last_seen` matches the current run's start timestamp), not from
-   in-memory pipeline state.
+   `violation_events.csv` lives in the DB. Both CSVs are produced by
+   `dump_run` (which calls `snapshot.facilities_in_run` /
+   `violations_in_run`) on demand, not at end of run — the runs only
+   write `run_health.json` + `newly_snc_*.csv` to the per-run folder.
 
-**Critical rule: do not delete `snapshot.sqlite` between runs.** Two
+**Critical rule: do not delete `snapshot.sqlite` between runs.** Three
 things break if you do:
 - Diff baseline resets — every facility looks "new" again.
-- The standing-inventory CSVs are empty until the next pipeline run
-  completes a full territory scan. Anyone who opens `all_leads.csv`
-  in the interim will see nothing.
+- The standing-inventory CSVs become empty — `dump_run` reads the DB,
+  so wiping it wipes every materialization target.
+- The membership tables are gone, so historical runs can't be
+  reconstructed at all.
 
 The cron pattern in `COMMANDS.md` preserves the DB path across runs.
 

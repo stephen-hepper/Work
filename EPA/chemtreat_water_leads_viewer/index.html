@@ -330,6 +330,7 @@
   .cov-seg { height: 100%; min-width: 2px; }
   .cov-with   { background: var(--green); }
   .cov-nodata { background: var(--orange); }
+  .cov-gated  { background: var(--muted); }
   .cov-failed { background: var(--danger); }
   .cov-legend {
     display: flex; gap: 14px; flex-wrap: wrap;
@@ -2061,9 +2062,12 @@ function renderDetail(r) {
 
 function setHealth(data) {
   // Refuse unknown schema versions so we don't render stale fields silently.
-  // v1 and v2 are both rendered; v2 adds the drill-down failed/no-data
-  // breakdown, which renderHealth() guards for so v1 files still work.
-  if (!data || (data.schema_version !== 1 && data.schema_version !== 2)) {
+  // v1/v2/v3 all render; v2 added the drill-down failed/no-data breakdown,
+  // v3 splits "gated_unactionable" out of no_data (the fine-comb gate
+  // excluded these leads as RNC-only / terminated / no-violation; calling
+  // them "no records on file" misrepresents what happened). renderHealth()
+  // guards for the new field so v1/v2 files still display correctly.
+  if (!data || ![1, 2, 3].includes(data.schema_version)) {
     showToast("run_health.json has unknown schema_version; ignoring");
     return;
   }
@@ -2094,11 +2098,13 @@ function cmdBlock(cmd) {
 /* Stacked horizontal bar for the drill-down coverage card. Segments are
  * sized by share of `attempted`; zero-count segments are omitted from both
  * the bar and the legend so a clean run looks clean. */
-function coverageBar(withEvents, noData, failed, attempted) {
+function coverageBar(withEvents, noData, failed, attempted, gated) {
   if (!attempted) return "";
+  gated = gated || 0;
   const pctW = 100 * withEvents / attempted;
   const pctN = 100 * noData / attempted;
   const pctF = 100 * failed / attempted;
+  const pctG = 100 * gated / attempted;
   const seg = (cls, pct, title, n) => n > 0
     ? `<div class="cov-seg cov-${cls}" style="width: ${pct}%" title="${escAttr(title)}"></div>`
     : "";
@@ -2109,11 +2115,13 @@ function coverageBar(withEvents, noData, failed, attempted) {
     <div class="cov-bar" aria-label="Drill-down coverage breakdown">
       ${seg("with",   pctW, withEvents + " with events", withEvents)}
       ${seg("nodata", pctN, noData + " no records on file", noData)}
+      ${seg("gated",  pctG, gated + " un-actionable (gated)", gated)}
       ${seg("failed", pctF, failed + " lookups failed", failed)}
     </div>
     <div class="cov-legend">
       ${item("with", "with events", withEvents)}
       ${item("nodata", "no records on file", noData)}
+      ${item("gated", "un-actionable (skipped)", gated)}
       ${item("failed", "lookups failed", failed)}
     </div>`;
 }
@@ -2226,6 +2234,7 @@ function renderHealth() {
     const withEvents = drill.with_events || 0;
     const failed = drill.lookup_failed || 0;
     const noData = drill.no_data || 0;
+    const gated = drill.gated_unactionable || 0;
     const pct = attempted ? Math.round(100 * withEvents / attempted) : 100;
     const failStates = Object.keys(drill.lookup_failed_by_state || {});
     const failBlock = failed > 0 ? `
@@ -2235,13 +2244,16 @@ function renderHealth() {
         </div>` : "";
     const noDataNote = noData > 0 ? `
         <div class="subtitle" style="margin-top:8px;">&#8505; ${noData} drilled lead${noData === 1 ? "" : "s"} returned no records on file — usually legitimate (reporting-only or stormwater general-permit noncompliance carries no effluent exceedances to show). Nothing to re-run; if a <em>major</em> facility looks empty it may be a silent throttle — spot-check it on ECHO.</div>` : "";
+    const gatedNote = gated > 0 ? `
+        <div class="subtitle" style="margin-top:8px;">&#8505; ${gated} high-value lead${gated === 1 ? " was" : "s were"} skipped by the un-actionable gate (SNC text indicates RNC-only / terminated permit / no current violation). EPA's per-event endpoints have nothing chemistry-relevant to return for these, so the run intentionally didn't ask. Score still reflects past enforcement; the lead just isn't a fine-comb target. <em>Not</em> a coverage gap — re-running won't change them.</div>` : "";
     cards.push(`
       <div class="health-card ${failed > 0 ? "alert" : "ok"}">
         <h3>Drill-down coverage: ${withEvents} of ${attempted} high-value lead${attempted === 1 ? "" : "s"} have event detail</h3>
         <div class="subtitle">${pct}% of leads with a <strong>facility-only</strong> score ≥ ${minScore} came back with per-event detail. Event-aware re-scoring may shift some of these below ${minScore} in the final inventory, so this count won't match the Inventory tile exactly.</div>
         <div class="big-number">${pct}%</div>
-        ${coverageBar(withEvents, noData, failed, attempted)}
+        ${coverageBar(withEvents, noData, failed, attempted, gated)}
         ${failBlock}
+        ${gatedNote}
         ${noDataNote}
       </div>`);
   } else if (highNoEventsTotal > 0) {

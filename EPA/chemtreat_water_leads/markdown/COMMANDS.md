@@ -266,22 +266,44 @@ Each run writes into its own subfolder of the output directory, named
 `<command>_<scope>_<YYYYMMDD-HHMMSS>` (e.g.
 `out/bulk_nationwide_20260527-090000/` or
 `out/pipeline_WA-AL-VA-LA-GA_20260527-121500/`). Runs never overwrite
-each other — a targeted `pipeline` run leaves an earlier `bulk` run's
-files untouched. The path is printed at the end of each run. Inside that
-folder:
+each other. The path is printed at the end of each run. Inside that
+folder are ONLY the artifacts that can't be reconstructed from the DB:
 
 | File | Purpose | Updates |
 |---|---|---|
-| `READ_ME_FIRST.txt` | Lag warning. Open first. | One per run folder |
-| `all_leads.csv` | Full ranked inventory of current violators | One per run folder |
-| `violation_events.csv` | Underlying individual DMR / SDWA events | One per run folder |
-| `run_health.json` | Run metadata + warnings + coverage/depth signals for the viewer's Run Health tab | One per run folder |
-| `new_facilities_YYYYMMDD.csv` | Facilities first seen this run | One per run folder |
-| `newly_snc_YYYYMMDD.csv` | Facilities that crossed into Significant Non-Complier since last run | One per run folder |
-| `new_violations_YYYYMMDD.csv` | Individual new violation events since last run | One per run folder |
+| `run_health.json` | Run metadata + warnings + coverage/depth signals for the viewer's Run Health tab. Captures run-time observations (throttle events, bot-blocks, gate stats) that are gone once the run ends. | One per run folder |
+| `newly_snc_YYYYMMDD.csv` | Facilities that crossed into Significant Non-Complier since the prior run. Needs the *prior* `snc_flag` value, which the upsert overwrites — so it can't be reconstructed later. | One per run folder (skipped if empty) |
 
-The `new_*` files are what sales actually opens each morning. The
-`all_leads.csv` is the standing inventory for territory planning.
+Everything else (`all_leads.csv`, `violation_events.csv`,
+`new_facilities.csv`, `new_violations.csv`) is materialized on demand
+from `snapshot.sqlite` via:
+
+```bash
+# Latest run
+python -m chemtreat_water_leads.dump_run --db ./snapshot.sqlite --latest \
+    --out ./materialized/run_latest
+
+# A specific run_id (use --list to see them)
+python -m chemtreat_water_leads.dump_run --db ./snapshot.sqlite --run-id 42 \
+    --out ./materialized/run_42
+
+# Show recent runs with touched-row counts
+python -m chemtreat_water_leads.dump_run --db ./snapshot.sqlite --list
+```
+
+The end-of-run log for both `bulk_loader` and `pipeline` prints the
+exact `dump_run` command for the run that just finished. The
+materialized CSVs use the same column shape and serialization the
+old inline writes used, so the viewer's auto-detect doesn't care
+whether a file came from inline write or `dump_run`.
+
+**Why this split.** `snapshot.sqlite` is the source of truth — the
+membership tables (`run_facility_membership`,
+`run_violation_membership`) let any past run be reconstructed
+exactly. Writing the same data inline every run was ~15-50 MB of
+redundant cache per run folder. Dropping it makes "DB is canonical"
+explicit and sets up the eventual Snowflake migration where the
+viewer will query the warehouse directly.
 
 ### Columns sales filters on
 
@@ -363,10 +385,12 @@ schedules:
   in a territory (e.g. a Run Health "lookup_failed" gap).
 
 The HTML viewer in `../chemtreat_water_leads_viewer/index.html` reads
-these columns directly — open it in a browser and use the Upload CSV
-button to load `all_leads.csv` (and optionally `violation_events.csv`)
-from the run folder you want to view. The viewer shows one run at a
-time; to compare a nationwide run against a targeted one, upload each
+these columns directly — first materialize the run you want with
+`dump_run --latest --out <dir>`, then open the viewer in a browser and
+use the Upload CSV button to load `all_leads.csv`,
+`violation_events.csv`, and the original run folder's `run_health.json`.
+The viewer shows one run at a time; to compare a nationwide run against
+a targeted one, materialize each into a separate folder and upload each
 in turn.
 
 ---

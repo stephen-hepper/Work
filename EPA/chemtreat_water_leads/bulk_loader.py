@@ -1222,6 +1222,45 @@ def _augment_leads(leads: list[dict], events: list[dict],
 SECONDARY_DRILLDOWN_MIN_SCORE = 20
 
 
+# SNC text patterns that mark a lead as un-actionable for API fine-comb.
+# A high lead_score driven by one of these reflects a regulatory state
+# EPA's per-event endpoints won't surface anything useful for:
+#
+#   - "Failure to Report" / "DMR - Not Received": Reporting Non-Compliance.
+#     The facility missed paperwork; no chemistry-relevant exceedance to
+#     drill. EPA's DMR archive shows NODI='C' (no discharge) rows for
+#     these — verified on KSG110024 in the 2026-06-12 run. Drilling
+#     burns API budget for zero recovery and contributes to the 20-streak
+#     429 short-circuit that breaks fine-comb for actionable leads.
+#   - "Terminated Permit": permit closed; nothing current to surface.
+#   - "No Violation Identified": SNC text explicitly says no current
+#     violation. Score carried by historical formal_actions_5yr; per-event
+#     drill returns nothing.
+#
+# Empirical basis: 2026-06-12 nationwide run queued 993 high-value leads
+# for fine-comb; 724 (73%) hit one of these patterns and would not have
+# surfaced events even on a clean EPA response.
+_UNACTIONABLE_SNC_PATTERNS = (
+    "failure to report",
+    "dmr - not received",
+    "terminated permit",
+    "no violation identified",
+)
+
+
+def _is_unactionable_for_drilldown(lead: dict) -> bool:
+    """True if SNC text marks the lead as un-actionable for API fine-comb.
+
+    Lead stays in the inventory — score reflects real signals (past
+    enforcement, missed reporting) — but per-event API drill would
+    return nothing AND counts against EPA's per-IP throttle bucket.
+    """
+    txt = (lead.get("snc_status") or "").lower()
+    if not txt:
+        return False
+    return any(p in txt for p in _UNACTIONABLE_SNC_PATTERNS)
+
+
 def _drilldown_candidates(leads: list[dict],
                           prior_scores: dict[tuple[str, str], int],
                           prior_eligibility: dict[tuple[str, str], str] | None = None,
@@ -1244,6 +1283,12 @@ def _drilldown_candidates(leads: list[dict],
       * Leads that already have per-event detail from the bulk feed
         (`outreach_posture != "no_events"`) — the API drill would be
         redundant.
+      * Leads whose SNC text marks them un-actionable for fine-comb
+        (`_is_unactionable_for_drilldown` — RNC-only, terminated
+        permit, or "no violation identified"). EPA's per-event
+        endpoints have nothing chemistry-relevant to return for these;
+        skipping them preserves the fine-comb budget for genuine
+        current violations and avoids tripping the 429 short-circuit.
       * Leads still in their drill-down backoff window — i.e. whose
         `next_drilldown_eligible_at` is in the future. When
         `prior_eligibility` is supplied, this filter applies AFTER
@@ -1266,6 +1311,8 @@ def _drilldown_candidates(leads: list[dict],
     out: list[dict] = []
     for lead in leads:
         if lead["outreach_posture"] != "no_events":
+            continue
+        if _is_unactionable_for_drilldown(lead):
             continue
         key = (lead["registry_id"], lead["program"])
         score = lead["lead_score"]
@@ -1533,7 +1580,19 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
         # this run are excluded by `_drilldown_candidates`.
         candidates = _drilldown_candidates(leads, prior_scores,
                                            prior_eligibility=prior_eligibility)
+        gated_unactionable = sum(
+            1 for L in leads
+            if L["lead_score"] >= EVENT_DRILLDOWN_MIN_SCORE
+            and L["outreach_posture"] == "no_events"
+            and _is_unactionable_for_drilldown(L)
+        )
         drilldown_stats["candidates"] = len(candidates)
+        drilldown_stats["gated_unactionable"] = gated_unactionable
+        if gated_unactionable:
+            log.info("Drill-down gating: %d high-value lead(s) excluded as "
+                     "un-actionable (RNC-only / terminated / no-violation); "
+                     "%d candidate(s) remain for fine-comb",
+                     gated_unactionable, len(candidates))
         # Leads whose fine-comb drill RAISED (vs. returned cleanly empty),
         # final-attempt outcome. Feeds the Run Health failed-vs-no-data split.
         failed_keys: set = set()
@@ -1579,13 +1638,23 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
         # consumed by the viewer).
         high_value = [L for L in leads
                       if L["lead_score"] >= EVENT_DRILLDOWN_MIN_SCORE]
+        # Keys the gate excluded from fine-comb — surfaced as their own
+        # bucket so the viewer can distinguish "we asked and EPA said
+        # nothing" (no_data) from "we deliberately didn't ask" (gated).
+        gated_keys = {(L["registry_id"], L["program"]) for L in high_value
+                      if _is_unactionable_for_drilldown(L)}
         drilldown_stats.update(
-            _health.summarize_drilldown(high_value, events, failed_keys, leads))
+            _health.summarize_drilldown(high_value, events, failed_keys,
+                                        leads, gated_keys=gated_keys))
 
-    # 5. Persist to DB + write standing-state CSVs from DB.
-    # Same source-of-truth pattern as pipeline.py.
+    # 5. Persist to DB. snapshot.sqlite is the source of truth — the
+    # standing-inventory CSVs (all_leads, violation_events) and the
+    # new_* diff CSVs are now materialized on demand by
+    # `python -m chemtreat_water_leads.dump_run` rather than written
+    # every run. Only `newly_snc_*.csv` (needs the prior snc_flag the
+    # upsert overwrites) and `run_health.json` (captures run-time
+    # warnings) land in the run folder — both are irrecoverable later.
     run_start_ts = datetime.utcnow().isoformat(timespec="seconds")
-    # Per-run folder so this run's CSVs don't overwrite a prior run's.
     run_dir = _run_output_dir(out_dir, "bulk", states, run_start_ts)
     with snapshot.open_db(db_path) as conn:
         # record_run first so its returned run_id can be threaded through
@@ -1598,13 +1667,8 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
             conn, leads, run_id, now=run_start_ts)
         viol_diff = snapshot.diff_and_upsert_violations(
             conn, events, run_id, now=run_start_ts)
-        today = datetime.utcnow().strftime("%Y%m%d")
-        _write_lag_notice(run_dir)
-        snapshot.dump_facilities_csv(conn, run_dir / "all_leads.csv", run_start_ts)
-        snapshot.dump_violations_csv(conn, run_dir / "violation_events.csv", run_start_ts)
-    _write_csv(run_dir / f"new_facilities_{today}.csv", fac_diff["new"])
+    today = datetime.utcnow().strftime("%Y%m%d")
     _write_csv(run_dir / f"newly_snc_{today}.csv", fac_diff["newly_snc"])
-    _write_csv(run_dir / f"new_violations_{today}.csv", viol_diff["new"])
 
     health_path = _health.write_run_health(
         run_dir,
@@ -1628,8 +1692,11 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
              len(leads), len(events),
              len(fac_diff["new"]), len(fac_diff["newly_snc"]),
              len(viol_diff["new"]))
-    log.info("Run outputs in %s — upload all_leads.csv, violation_events.csv, "
-             "and run_health.json from there.", run_dir)
+    log.info("Run %d outputs in %s (run_health.json, newly_snc_*.csv). "
+             "To materialize all_leads.csv + violation_events.csv for the "
+             "viewer, run:  python -m chemtreat_water_leads.dump_run "
+             "--db %s --run-id %d --out ./materialized/run_%d",
+             run_id, run_dir, db_path, run_id, run_id)
     print(LAG_BANNER)
 
 

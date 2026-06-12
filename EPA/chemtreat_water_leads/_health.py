@@ -18,7 +18,7 @@ import logging
 from pathlib import Path
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class WarningCollector(logging.Handler):
@@ -60,27 +60,42 @@ def per_state_missing_events(leads: list[dict], min_score: int) -> dict[str, int
 
 
 def summarize_drilldown(high_value: list[dict], events: list[dict],
-                        failed_keys: set, leads: list[dict]) -> dict:
+                        failed_keys: set, leads: list[dict],
+                        gated_keys: set | None = None) -> dict:
     """Classify the high-value drill-down outcomes for the Run Health tab.
 
     Splits the leads that were *attempted* (score >= threshold, with the
-    identifier their program needs) into three buckets:
+    identifier their program needs) into four buckets:
 
-      with_events   - drilled and found ≥1 event
-      lookup_failed - drill RAISED (timeout / connection drop / bot-block);
-                      incomplete, worth re-running. `failed_keys` carries
-                      these (final-attempt outcome) from the drill helpers.
-      no_data       - drilled but returned no rows. Usually legitimate
-                      (reporting-only or stormwater general-permit
-                      noncompliance has no effluent exceedances to return);
-                      occasionally a silently-throttled HTTP-200-empty that
-                      can't be distinguished from real emptiness here.
+      with_events        - drilled and found ≥1 event
+      lookup_failed      - drill RAISED (timeout / connection drop / bot-block);
+                           incomplete, worth re-running. `failed_keys` carries
+                           these (final-attempt outcome) from the drill helpers.
+      gated_unactionable - high-value but the fine-comb gate excluded them
+                           from drilling (RNC-only SNC / terminated permit /
+                           "no violation identified"). EPA's per-event
+                           endpoints have nothing chemistry-relevant to
+                           return for these, so drilling burns API budget
+                           and contributes to the 20-streak 429
+                           short-circuit. Tracked separately from no_data
+                           because the user shouldn't act on these (re-run
+                           won't help) AND the system intentionally didn't
+                           ask EPA — distinct from "we asked and EPA said
+                           nothing." Bulk path only; pipeline doesn't gate.
+      no_data            - drilled but returned no rows. Usually legitimate
+                           (reporting-only or stormwater general-permit
+                           noncompliance has no effluent exceedances to
+                           return); occasionally a silently-throttled
+                           HTTP-200-empty that can't be distinguished from
+                           real emptiness here.
 
     Returns counts, the per-state breakdown of the lookup_failed bucket
     (so the viewer can build a targeted re-run command), and the explicit
-    failed keys as "registry_id|program" strings (so the viewer can mark
-    those leads' posture as "lookup failed" vs. "no records on file").
+    failed/gated keys as "registry_id|program" strings (so the viewer can
+    mark those leads' posture as "lookup failed", "un-actionable", or
+    "no records on file").
     """
+    gated_keys = gated_keys or set()
     attempted = {
         (L["registry_id"], L["program"]) for L in high_value
         if (L["program"] == "CWA" and L.get("permit_id"))
@@ -91,7 +106,8 @@ def summarize_drilldown(high_value: list[dict], events: list[dict],
     } & attempted
     no_event = attempted - with_events
     failed = no_event & set(failed_keys)
-    no_data = no_event - failed
+    gated = (no_event - failed) & set(gated_keys)
+    no_data = no_event - failed - gated
 
     state_by_key = {
         (L["registry_id"], L["program"]): (L.get("state") or "?") for L in leads
@@ -105,11 +121,13 @@ def summarize_drilldown(high_value: list[dict], events: list[dict],
         "attempted": len(attempted),
         "with_events": len(with_events),
         "lookup_failed": len(failed),
+        "gated_unactionable": len(gated),
         "no_data": len(no_data),
         "lookup_failed_by_state": dict(
             sorted(by_state.items(), key=lambda kv: -kv[1])
         ),
         "lookup_failed_keys": sorted(f"{k[0]}|{k[1]}" for k in failed),
+        "gated_unactionable_keys": sorted(f"{k[0]}|{k[1]}" for k in gated),
     }
 
 
