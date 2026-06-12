@@ -829,12 +829,12 @@ def _resolve_model(direct_openai: bool) -> str:
     """Which model to pass to chat.completions.create.
 
     Azure uses the deployment name (set during provisioning); direct
-    OpenAI uses a model id like `gpt-4o-mini`. Default the direct path
-    to `gpt-4o-mini` — capable enough for this task and cheap enough
+    OpenAI uses a model id like `gpt-5.4-nano`. Default the direct path
+    to `gpt-5.4-nano` — capable enough for this task and cheap enough
     to iterate on tone freely.
     """
     if direct_openai:
-        return os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        return os.environ.get("OPENAI_MODEL", "gpt-5.4-nano")
     return os.environ["AZURE_OPENAI_DEPLOYMENT"]
 
 
@@ -875,7 +875,7 @@ def main() -> None:
                         "instead of Azure. Quick-test path for "
                         "validating the flow before Azure provisioning. "
                         "Reads OPENAI_API_KEY (required) and "
-                        "OPENAI_MODEL (default gpt-4o-mini) from env "
+                        "OPENAI_MODEL (default gpt-5.4-nano) from env "
                         "or .env. See README.md.")
     p.add_argument("-v", "--verbose", action="store_true")
 

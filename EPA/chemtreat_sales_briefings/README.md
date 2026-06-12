@@ -96,14 +96,14 @@ cp chemtreat_sales_briefings/.env.example .env
     --openai-direct --regions Gulf -v
 ```
 
-That produces a one-region dry-run briefing using `gpt-4o-mini`
-(override with `OPENAI_MODEL=gpt-4o` in `.env` if you want stronger
+That produces a one-region dry-run briefing using `gpt-5.4-nano`
+(override with `OPENAI_MODEL=gpt-5.4` in `.env` if you want stronger
 prose). The same tool surface and prompts as the Azure path — the
 only thing that changes is the transport. `EPA/.env` is gitignored;
 shell-exported env vars still take precedence so you can also just
 `export OPENAI_API_KEY=...` and skip the file.
 
-Cost ballpark with `gpt-4o-mini`: a one-region dry-run is typically
+Cost ballpark with `gpt-5.4-nano`: a one-region dry-run is typically
 a few cents at current pricing. Five regions ≈ $0.10-$0.30 depending
 on how much tool data the model pulls. Cheap enough to iterate on
 tone freely.
