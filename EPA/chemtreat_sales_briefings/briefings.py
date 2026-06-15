@@ -752,6 +752,35 @@ def send_email(msg: EmailMessage) -> None:
     log.info("Sent briefing to %s", msg["To"])
 
 
+# ----------------------------------------------------------- file output
+
+def _write_briefing_file(out_dir: Path, region: str, msg: EmailMessage,
+                         body: str, mode: str, run_stamp: str) -> Path:
+    """Persist a region's briefing to `out_dir` as markdown.
+
+    Naming mirrors the bulk_loader pattern: `<command>_<scope>_<stamp>`.
+    Mode (`dry-run` or `send`) is a filename suffix so a `ls` of `out/`
+    distinguishes "what would have been sent" from "what we actually
+    sent" without opening files. All regions in a single run share
+    `run_stamp` so a multi-region run clusters in the listing.
+
+    Content matches the dry-run stdout banner — same header, same
+    To/Subject/body block — so the saved file looks like what shows
+    on screen during iteration.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"briefings_{region}_{run_stamp}.{mode}.md"
+    banner = "DRY RUN" if mode == "dry-run" else "SENT"
+    rule = "=" * 72
+    path.write_text(
+        f"{rule}\n{banner} — {region}\n{rule}\n"
+        f"To:      {msg['To']}\n"
+        f"Subject: {msg['Subject']}\n\n"
+        f"{body}\n"
+    )
+    return path
+
+
 # ----------------------------------------------------------- CLI / main
 
 def _load_dotenv(path: Path = Path(".env")) -> None:
@@ -870,6 +899,14 @@ def main() -> None:
                    help="Ignore the candidate filter — return top "
                         "leads by score regardless of briefing "
                         "history. For testing the gating logic.")
+    p.add_argument("--out-dir",
+                   default="./chemtreat_sales_briefings/out",
+                   help="Where to write per-region briefing files "
+                        "(one .md per region per run, named "
+                        "briefings_<region>_<YYYYMMDD-HHMMSS>.<mode>.md). "
+                        "Default: ./chemtreat_sales_briefings/out, "
+                        "which assumes CWD=EPA/ per the README. "
+                        "Folder is created on first run.")
     p.add_argument("--openai-direct", action="store_true",
                    help="Use api.openai.com directly with OPENAI_API_KEY "
                         "instead of Azure. Quick-test path for "
@@ -921,6 +958,11 @@ def main() -> None:
              "OpenAI (direct)" if args.openai_direct else "Azure OpenAI",
              model)
     today = datetime.utcnow().strftime("%Y-%m-%d")
+    # One stamp per RUN (not per region) so a multi-region run clusters
+    # in the out/ listing — mirrors bulk_loader's _run_output_dir pattern.
+    run_stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    out_dir = Path(args.out_dir).expanduser().resolve()
+    mode = "send" if args.send else "dry-run"
 
     # candidates_tracker collects the candidate set the LLM saw, per
     # region. The mark step at the end of each region reads from this
@@ -950,6 +992,11 @@ def main() -> None:
             print()
             print(body)
             print()
+
+        # Persist regardless of mode — the file is the artifact even
+        # when --send is on (so there's a record of what went out).
+        path = _write_briefing_file(out_dir, region, msg, body, mode, run_stamp)
+        log.info("Wrote %s briefing for %s -> %s", mode, region, path)
 
         if args.mark_briefed:
             featured = candidates_tracker.get(region, [])

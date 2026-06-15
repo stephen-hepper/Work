@@ -65,7 +65,9 @@ chemtreat_sales_briefings/
 ├── README.md      ← you are here
 ├── briefings.py   ← tools + LLM loop + email render/send + CLI
 ├── regions.py     ← region → states → sales lead config (edit freely)
-└── state.py       ← briefings_state.sqlite — "which leads featured when"
+├── state.py       ← briefings_state.sqlite — "which leads featured when"
+├── samples/       ← committed reference briefings (what "good" looks like)
+└── out/           ← generated per-region briefing files (gitignored)
 ```
 
 State lives in a separate `briefings_state.sqlite` (default location:
@@ -148,6 +150,31 @@ Both DB paths default to the current working directory — `snapshot.sqlite`
 and `briefings_state.sqlite`. That assumes you run from `EPA/` (per the
 examples above). Override with `--db` or `--state-db` if your layout
 differs.
+
+### Output files
+
+Every run writes one markdown file per region to `--out-dir` (default
+`./chemtreat_sales_briefings/out/`). Naming mirrors the bulk_loader
+run-folder pattern:
+
+```
+chemtreat_sales_briefings/out/
+├── briefings_Gulf_20260612-153800.dry-run.md
+├── briefings_Southeast_20260612-153800.dry-run.md
+└── briefings_Gulf_20260619-070000.send.md
+```
+
+All regions in a single run share the same timestamp, so a multi-region
+run clusters in the listing. Mode (`dry-run` or `send`) is in the
+filename — `ls` distinguishes "would-have-been-sent" from "actually
+sent" at a glance. Folder is gitignored; the runtime creates it on
+first run if missing. Override the location with `--out-dir <path>`.
+
+Dry-run mode still prints the briefing to stdout for immediate feedback
+during iteration — the file is the persistent artifact.
+
+For a committed reference example of what a briefing looks like, see
+`chemtreat_sales_briefings/samples/`.
 
 ---
 

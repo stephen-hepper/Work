@@ -34,6 +34,11 @@ EPA/chemtreat_water_leads_viewer/images/Screenshot*.png
 # Briefings state — operational, not source of truth
 EPA/briefings_state.sqlite
 
+# Briefings run outputs — generated per region per run. Reference
+# examples (the seed of "what a briefing looks like") live under
+# chemtreat_sales_briefings/samples/ and ARE tracked.
+EPA/chemtreat_sales_briefings/out/
+
 # Secrets — never commit. .env.example is fine to track.
 .env
 **/.env
