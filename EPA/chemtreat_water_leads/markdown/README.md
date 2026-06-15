@@ -404,8 +404,9 @@ violation rows (which is the common case). `--no-events` makes the
 run fully offline — zero EPA API calls, zero event-zip downloads.
 
 See `RATIONALE.md` for the design choices behind per-program shapes,
-the three-trigger drill-down candidate set, and the SQLite-as-source-
-of-truth contract.
+the drill-down candidate selection (three positive triggers plus an
+un-actionable-SNC gate and a per-row backoff window), and the
+SQLite-as-source-of-truth contract.
 
 See **`COMMANDS.md`** for the full command reference with realistic
 time estimates, first-run vs later-run differences, daily-cron patterns,
