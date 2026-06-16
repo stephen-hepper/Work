@@ -465,6 +465,20 @@ Per `feedback_viewer_testing` — `node --check` only, no jsdom harness.
    query picks up score deltas automatically via `score_changed`. No
    new tool needed for v1. A dedicated `recent_sewer_overflows` tool
    would be a nice future LLM-callable, but defer.
+9. **POTW NAICS not in `TARGET_NAICS`** (uncovered by the integration
+   test). Real POTWs sit under NAICS `2213x` ("Water, Sewage and Other
+   Systems") but the current `pipeline.TARGET_NAICS` list focuses on
+   industrial customers (`2211`, `311`, `312`, `322`, `324`, `325`,
+   `327`, …). So the bulk loader's exporter filter drops POTW leads
+   today. Two options: (a) widen TARGET_NAICS to include `2213` —
+   straightforward but materially changes the inventory shape since
+   POTWs are the biggest CWA permit class; (b) keep the current scope
+   and accept that sewer-overflow signal only attaches to industrial
+   permits that happen to have a collection system (rare). **Decision
+   needed before the first nationwide run** — without (a), the
+   integration's headline POTW-segment value isn't realized. Worth
+   asking sales whether ChemTreat actively prospects POTWs as
+   chemistry customers; if yes, widen.
 
 ---
 

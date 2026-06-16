@@ -85,6 +85,18 @@ BULK_URLS = {
     # year-rollover triggers a redownload rather than re-using stale
     # data.
     "dmr_fy2026":    "https://echo.epa.gov/files/echodownloads/npdes_dmrs_fy2026.zip",
+    # Sewer Overflow / Bypass events — ~1 MB compressed, DAILY refresh
+    # under the NPDES eRule Phase 2 (started 2025-03). Carries the
+    # events + types + collection_system_permits CSVs we read; the
+    # other six CSVs in the archive are deferred (see CSO_SSO_PLAN.md).
+    # Cache window overridden to 1d in run_bulk so the daily cadence
+    # actually reaches the lead rows.
+    "sewer_overflow": "https://echo.epa.gov/files/echodownloads/current_sewer_overflow_and_collection_systems_tables.zip",
+    # National CSO Inventory — ~300 KB compressed, weekly. Supplements
+    # the events zip's collection_system_permits.csv with the ~649
+    # CSO-system permits whose state hasn't yet onboarded the eRule
+    # collection-system reporting.
+    "cso_inventory":  "https://echo.epa.gov/files/echodownloads/ALL_CSO_downloads.zip",
 }
 
 CACHE_MAX_AGE_DAYS = 7   # ECHO refreshes weekly; cache for that long
@@ -92,25 +104,29 @@ CACHE_MAX_AGE_DAYS = 7   # ECHO refreshes weekly; cache for that long
 
 # ----------------------------------------------------- download w/ cache
 
-def _download_cached(url: str, cache_dir: Path, name: str) -> Path:
+def _download_cached(url: str, cache_dir: Path, name: str,
+                     max_age_days: int = CACHE_MAX_AGE_DAYS) -> Path:
     """Download `url` to `cache_dir/name.zip`. Skip if cached file is fresh.
 
     Caching here is important: the ECHO Exporter is ~250 MB. You don't want
-    to pull it on every run. EPA refreshes weekly, so a 7-day cache window
-    matches their update cadence.
+    to pull it on every run. Most EPA feeds refresh weekly so the
+    default `CACHE_MAX_AGE_DAYS=7` matches their cadence. The
+    sewer-overflow events feed is the exception (daily refresh under
+    the 2025 eRule Phase 2) — callers pass `max_age_days=1` for that
+    one so the cache doesn't burn 6 of every 7 daily updates.
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
     target = cache_dir / f"{name}.zip"
 
     if target.exists():
         age = datetime.utcnow() - datetime.utcfromtimestamp(target.stat().st_mtime)
-        if age < timedelta(days=CACHE_MAX_AGE_DAYS):
+        if age < timedelta(days=max_age_days):
             log.info("Using cached %s (%.1f days old, %.1f MB)",
                      name, age.total_seconds() / 86400,
                      target.stat().st_size / 1e6)
             return target
         log.info("Cached %s is %.1f days old (>%d); re-downloading",
-                 name, age.total_seconds() / 86400, CACHE_MAX_AGE_DAYS)
+                 name, age.total_seconds() / 86400, max_age_days)
 
     log.info("Downloading %s from %s …", name, url)
     # Use `requests` (which trusts certifi's CA bundle) rather than
@@ -1932,12 +1948,97 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
         except Exception as e:
             log.warning("DMR archive load failed: %s", e)
 
+        # Sewer Overflow / Bypass — daily-cadence active-compliance
+        # signal. Cache window pinned to 1 day so the daily refresh
+        # actually reaches the lead rows (default would coalesce 7 of
+        # them). Signals applied immediately so the new rules
+        # (rule_recent_sewer_overflow, rule_combined_sewer_system,
+        # rule_collection_system_population) contribute to drill-down
+        # candidate selection. Events held alongside dmr_events for
+        # later append — same dedup convention as DMR-vs-NPDES_SE.
+        sewer_events: list[dict] = []
+        try:
+            sewer_zip = _download_cached(BULK_URLS["sewer_overflow"],
+                                         cache_dir, "sewer_overflow",
+                                         max_age_days=1)
+            sewer_signals, sewer_events = stream_sewer_overflow_events(
+                sewer_zip, kept_npdes_permits, permit_to_registry)
+            sewer_hits = 0
+            for lead in leads:
+                if lead["program"] != "CWA":
+                    continue
+                sig = sewer_signals.get(lead["permit_id"])
+                if sig:
+                    lead.update(sig)
+                    lead["__raw"].update(sig)
+                    sewer_hits += 1
+            log.info("Applied sewer-overflow signals to %d CWA leads "
+                     "(%d total event rows queued for persistence)",
+                     sewer_hits, len(sewer_events))
+        except Exception as e:
+            log.warning("Sewer overflow load failed: %s", e)
+
+        # Collection-system permits — static enrollment data, lives in
+        # the sewer_overflow zip we already downloaded above. Cheap to
+        # scan even on its own. Feeds rule_combined_sewer_system (+5)
+        # and rule_collection_system_population (POTW revenue proxy).
+        try:
+            # Re-resolve the zip path; if the earlier download failed,
+            # this block will fail too and the warning chain will land
+            # twice in the log — acceptable (the second message
+            # explains exactly which feed died).
+            sewer_zip = _download_cached(BULK_URLS["sewer_overflow"],
+                                         cache_dir, "sewer_overflow",
+                                         max_age_days=1)
+            cs_signals = stream_collection_system_permits(
+                sewer_zip, kept_npdes_permits)
+            cs_hits = 0
+            for lead in leads:
+                if lead["program"] != "CWA":
+                    continue
+                sig = cs_signals.get(lead["permit_id"])
+                if sig:
+                    lead.update(sig)
+                    lead["__raw"].update(sig)
+                    cs_hits += 1
+            log.info("Applied collection-system permit signals to %d CWA leads",
+                     cs_hits)
+        except Exception as e:
+            log.warning("Collection-system permits load failed: %s", e)
+
+        # National CSO Inventory — covers the ~649 CSO-system permits
+        # the eRule data hasn't onboarded yet. ONLY emits
+        # has_combined_sewer_system=1; sets the flag on permits where
+        # collection_system_permits.csv didn't (either absent or
+        # css_pct=0). The OR semantics are intentional: a permit
+        # listed in the federal CSO inventory has CSO outfalls by
+        # definition.
+        try:
+            cso_zip = _download_cached(BULK_URLS["cso_inventory"],
+                                       cache_dir, "cso_inventory")
+            cso_signals = stream_cso_inventory(
+                cso_zip, kept_npdes_permits)
+            cso_hits = 0
+            for lead in leads:
+                if lead["program"] != "CWA":
+                    continue
+                sig = cso_signals.get(lead["permit_id"])
+                if sig:
+                    lead.update(sig)
+                    lead["__raw"].update(sig)
+                    cso_hits += 1
+            log.info("Applied CSO inventory signals to %d CWA leads", cso_hits)
+        except Exception as e:
+            log.warning("CSO inventory load failed: %s", e)
+
         # Re-score with the new facility-level signals so the new rules
         # (rule_treatable_permit_parameter, rule_discharges_to_impaired,
-        # rule_recent_dmr_exceedance, rule_exceeds_treatable_parameter)
-        # contribute BEFORE drill-down candidate selection. Pass an
-        # empty events list — events haven't been loaded yet, and
-        # _augment_leads's events=[] path skips EVENT_RULES cleanly.
+        # rule_recent_dmr_exceedance, rule_exceeds_treatable_parameter,
+        # rule_recent_sewer_overflow, rule_combined_sewer_system,
+        # rule_collection_system_population) contribute BEFORE drill-down
+        # candidate selection. Pass an empty events list — events
+        # haven't been loaded yet, and _augment_leads's events=[] path
+        # skips EVENT_RULES cleanly.
         _augment_leads(leads, events=[])
         leads.sort(key=lambda r: r["lead_score"], reverse=True)
         log.info("Pre-violation augmentation complete: %d leads now scoring >= %d",
@@ -1970,6 +2071,14 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
         # ~82% of exceedance rows (verified in the live FY2026 file);
         # the rest are DMR-only. Either way, DMR-last wins on conflict.
         events.extend(dmr_events)
+        # Sewer-overflow events ride a disjoint violation_id space
+        # (EPA's sewer_overflow_bypass_event_key is unique to this
+        # feed), so order doesn't affect upsert behavior — appended
+        # alongside DMR for symmetry. snapshot.diff_and_upsert_
+        # violations uses the npdes_id fallback when registry_id is
+        # blank, so the streamer's permit_to_registry-backfill is
+        # belt-and-suspenders.
+        events.extend(sewer_events)
 
         # 4a. Phase-2 augmentation: re-score with events, set posture, set tags.
         _augment_leads(leads, events)
