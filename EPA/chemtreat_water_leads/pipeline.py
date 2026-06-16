@@ -34,10 +34,23 @@ from . import _health, echo_client, scoring, snapshot
 log = logging.getLogger("chemtreat")
 
 # Industries ChemTreat typically serves. Edit freely - this is a marketing
-# decision, not a technical one.
+# decision, not a technical one. Prefixes — EPA prefix-matches NAICS
+# codes server-side, so "325" catches 325110 (basic chemicals), 325199
+# (other organic chemicals), etc.
 TARGET_NAICS = [
     "2211", "311", "312", "322", "324", "325", "327",
     "331", "332", "336", "622", "2111", "212",
+    # Sewage Treatment Facilities (POTWs). Added 2026-06-16 alongside
+    # the sewer-overflow integration — the daily-cadence SSO/CSO/BYP
+    # feed targets this exact segment, and without 22132 in the filter
+    # POTW leads never enter the inventory. 22132 is intentionally
+    # narrower than its parent 2213 ("Water, Sewage and Other Systems")
+    # to avoid 22131 (Water Supply / Irrigation — comes through SDWA
+    # already) and 22133 (Steam supply — irrelevant). Watch the run
+    # log for the inventory-size delta after this first lands; POTWs
+    # are the biggest CWA permit class and may shift score
+    # distributions enough to warrant re-baselining viewer color tiers.
+    "22132",
 ]
 
 # We only drill into violation *events* for high-scoring facilities,

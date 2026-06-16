@@ -43,19 +43,15 @@ class TestSewerOverflowIntegration(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
 
     def test_sewer_signals_flow_through_to_csv_and_lift_score(self):
-        # One CWA-signal facility with sewer-overflow signal attached.
-        # NAICS 325 (chemical manufacturing) is in `TARGET_NAICS` so
-        # the bulk loader keeps the row. **Real POTW NAICS (2213x) is
-        # NOT currently in TARGET_NAICS — see the open product
-        # question in CSO_SSO_PLAN.md.** The wiring contract this test
-        # pins is "if a permit has sewer-overflow data, the signal
-        # lands on the lead row." Whether POTW-NAICS leads ENTER the
-        # inventory in the first place is a separate decision.
+        # POTW with sewer-overflow signal attached. NAICS 221320
+        # (Sewage Treatment Facilities) is in `TARGET_NAICS` as of the
+        # 2026-06-16 widening — pinning POTW NAICS here so any future
+        # regression that drops "22132" from the list trips this test.
         exporter_rows = [{
             "REGISTRY_ID": "110000888001",
-            "FAC_NAME": "Springfield Industrial",
+            "FAC_NAME": "Springfield WWTP",
             "FAC_STATE": "IL",
-            "FAC_NAICS_CODES": "325",
+            "FAC_NAICS_CODES": "221320",
             "NPDES_IDS": "IL0888888",
             "CWA_SNC_FLAG": "Y",
             "CWA_COMPLIANCE_STATUS": "Significant/Category I Noncompliance",

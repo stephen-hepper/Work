@@ -269,7 +269,10 @@ Power gen (2211), food (311), beverage (312), paper (322), petroleum/coal
 products (324), chemical mfg (325), nonmetallic minerals (327), primary
 metals (331), fabricated metals (332), machinery (333), transportation
 equipment (336), hospitals (622), oil & gas extraction (2111), mining
-(212). These are prefixes — EPA does prefix-match server-side.
+(212), **POTWs / sewage treatment facilities (22132 — added 2026-06-16
+alongside the sewer-overflow integration; the daily-cadence SSO/CSO/BYP
+feed targets this segment)**. These are prefixes — EPA does prefix-match
+server-side.
 
 Edit `TARGET_NAICS` if sales gives you feedback. It's a marketing
 decision, not a technical one.
