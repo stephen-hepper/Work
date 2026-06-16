@@ -52,7 +52,7 @@ import requests
 
 from . import _health, scoring, snapshot
 from .pipeline import (
-    TARGET_NAICS, LAG_BANNER, SDWA_LAG_NOTE, CWA_LAG_NOTE,
+    TARGET_NAICS, LAG_BANNER, SDWA_LAG_NOTE, CWA_LAG_NOTE, SEWER_LAG_NOTE,
     EVENT_DRILLDOWN_MIN_SCORE, LOOKBACK_DAYS,
     _drill_cwa, _drill_sdwa, _write_csv, _write_lag_notice, _run_output_dir,
 )
@@ -1077,6 +1077,267 @@ def stream_dmr_exceedances(
     log.info("DMR exceedances done: scanned %d rows, kept %d exceedance "
              "rows across %d permits, emitted %d events",
              rows_scanned, rows_kept, len(out), len(events))
+    return out, events
+
+
+# ----------------------------------------------------- sewer overflow events
+#
+# current_sewer_overflow_and_collection_systems_tables.zip contains nine
+# CSVs (eight data + one column-metadata catalog) plus an ERD PDF. We
+# read three of them: the events backbone, the one-to-many types lookup,
+# and the collection-system permit enrollment (which carries CSS percent
+# + population — feeds rule_collection_system_population alongside the
+# event-based scoring).
+#
+# Schema pinned against the 2026-06-15 refresh (915 KB compressed, 4,221
+# events, 608 distinct permits, 15 states/territories reporting). EPA's
+# column names are LOWERCASE_SNAKE — verify with the header-dump in
+# CSO_SSO_PLAN.md if anything looks off.
+#
+# Reporting only began 2025-03 under the NPDES eRule Phase 2 and rolls
+# on state-by-state, so empty results are expected for many states. The
+# streamer surfaces a `SEWER_LAG_NOTE` on every event row.
+
+_SEWER_EVENTS_CSV = "sewer_overflow_bypass_report_events.csv"
+_SEWER_TYPES_CSV = "sewer_overflow_bypass_types.csv"
+_SEWER_PERMITS_CSV = "collection_system_permits.csv"
+
+# Per-event datetime format. EPA writes naive timestamps like
+# "2025-09-09 20:30:00" — no timezone, treat as UTC-equivalent for the
+# window comparison (we're not doing anything timezone-sensitive).
+_SEWER_DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _parse_sewer_datetime(s: str) -> datetime | None:
+    """Parse EPA's sewer-event datetime. Returns None on blank /
+    unparseable so the window filter ignores those rows safely."""
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        return datetime.strptime(s, _SEWER_DATETIME_FMT)
+    except ValueError:
+        return None
+
+
+def _safe_volume_gallons(raw: str) -> float | None:
+    """Parse a volume-gallons cell into a float, or None for blank /
+    unparseable / zero.
+
+    EPA reports ~30% of events with no volume — leaves the cell blank
+    rather than zeroing it. Treat None and 0 the same (don't add to
+    the sum, don't influence the tier)."""
+    s = (raw or "").strip()
+    if not s:
+        return None
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    return v if v > 0 else None
+
+
+def stream_sewer_overflow_events(
+    zip_path: Path,
+    kept_npdes_permits: set[str],
+    permit_to_registry: dict[str, str] | None = None,
+    window_days: int = 365,
+    now: datetime | None = None,
+) -> tuple[dict[str, dict], list[dict]]:
+    """Build per-permit sewer-overflow signals AND per-event rows from
+    `current_sewer_overflow_and_collection_systems_tables.zip`.
+
+    Returns ``(signals_by_permit, events)`` where:
+
+      signals_by_permit = {
+        npdes_id: {
+          "recent_sewer_overflow_count": int,
+          "recent_sewer_overflow_volume_gal": float,
+          "most_recent_sewer_overflow_at": str,    # ISO datetime
+          "recent_sewer_overflow_types": str,      # "CSO | SSO"
+          "has_dry_weather_overflow": int,         # 0/1
+        }
+      }
+
+      events = [
+        {"violation_id", "registry_id", "permit_id", "npdes_id",
+         "program", "violation_category", "parameter",
+         "dmr_value", "dmr_unit", "period_begin", "period_end",
+         "violation_description", "status", "data_lag_note", ...},
+        ...
+      ]
+
+    Filter:
+      * `permit_identifier in kept_npdes_permits`. Same shape as
+        stream_dmr_exceedances — identical join key.
+      * Event start within `window_days` of `now` (default
+        `datetime.utcnow()`).
+
+    Streaming notes:
+      * Pre-loads the types CSV into `{event_key: sorted [type_codes]}`
+        before scanning events. The types table is one-to-many (a
+        single event can carry multiple type codes — e.g. SSO and BYP
+        for an overflow that occurred during a bypass).
+      * `sewer_overflow_bypass_event_key` is EPA's stable system-
+        generated PK; used verbatim as `violation_id`.
+      * Datetimes are EPA's `"YYYY-MM-DD HH:MM:SS"` (naive). Rows with
+        unparseable / blank start datetime are kept but excluded from
+        the window cutoff (defensive — we'd rather see them than drop).
+    """
+    if not kept_npdes_permits:
+        log.info("No CWA permits in scope; skipping sewer-overflow scan.")
+        return {}, []
+
+    permit_to_registry = permit_to_registry or {}
+    now = now or datetime.utcnow()
+    cutoff = now - timedelta(days=window_days)
+
+    with zipfile.ZipFile(zip_path) as zf:
+        names = {n.lower(): n for n in zf.namelist()}
+        events_name = names.get(_SEWER_EVENTS_CSV)
+        types_name = names.get(_SEWER_TYPES_CSV)
+        if events_name is None or types_name is None:
+            raise RuntimeError(
+                f"Missing {_SEWER_EVENTS_CSV} or {_SEWER_TYPES_CSV} inside "
+                f"{zip_path.name}; EPA may have renamed a file — check "
+                "https://echo.epa.gov/tools/data-downloads"
+            )
+
+        # ----- Pre-load event-key → [type_codes] from the types CSV -----
+        # The types table is small (~4K rows on a typical refresh, one
+        # row per (event, type)). Loading it whole is cheap; the join
+        # against the events scan stays in-memory and O(events).
+        types_by_event: dict[str, set[str]] = {}
+        with zf.open(types_name) as raw_fh:
+            text_fh = io.TextIOWrapper(raw_fh, encoding="utf-8",
+                                       errors="replace")
+            for row in csv.DictReader(text_fh):
+                ek = row.get("sewer_overflow_bypass_event_key")
+                code = (row.get("sewer_overflow_bypass_type_code") or "").strip().upper()
+                if ek and code:
+                    types_by_event.setdefault(ek, set()).add(code)
+        log.info("Sewer types: loaded %d event→types entries", len(types_by_event))
+
+        # ----- Scan events ---------------------------------------------
+        out: dict[str, dict] = {}
+        events: list[dict] = []
+        types_by_permit: dict[str, set[str]] = {}
+        rows_scanned = rows_kept = 0
+
+        with zf.open(events_name) as raw_fh:
+            text_fh = io.TextIOWrapper(raw_fh, encoding="utf-8",
+                                       errors="replace")
+            for row in csv.DictReader(text_fh):
+                rows_scanned += 1
+                permit = row.get("permit_identifier")
+                if not permit or permit not in kept_npdes_permits:
+                    continue
+                event_key = row.get("sewer_overflow_bypass_event_key")
+                if not event_key:
+                    # No PK — can't dedupe across refreshes. Skip rather
+                    # than synthesize; the upstream-data contract says
+                    # this should always be populated.
+                    continue
+
+                start_raw = row.get("sewer_overflow_bypass_start_datetime") or ""
+                start_dt = _parse_sewer_datetime(start_raw)
+                # Window filter: skip events with a parseable start older
+                # than the cutoff. Unparseable / blank starts are KEPT —
+                # defensive, since the file's "current" snapshot already
+                # implies recency.
+                if start_dt is not None and start_dt < cutoff:
+                    continue
+
+                rows_kept += 1
+                end_raw = row.get("sewer_overflow_bypass_end_datetime") or ""
+                volume = _safe_volume_gallons(
+                    row.get("sewer_overflow_bypass_discharge_volume_gallons"))
+                wet = (row.get("wet_weather_occurance_indicator") or "").strip().upper()
+                structure = (row.get("sewer_overflow_structure_type_desc") or "").strip()
+                type_codes = types_by_event.get(event_key, set())
+
+                # ----- Per-permit rollup --------------------------------
+                sig = out.setdefault(permit, {
+                    "recent_sewer_overflow_count": 0,
+                    "recent_sewer_overflow_volume_gal": 0.0,
+                    "most_recent_sewer_overflow_at": "",
+                    "has_dry_weather_overflow": 0,
+                })
+                sig["recent_sewer_overflow_count"] += 1
+                if volume is not None:
+                    sig["recent_sewer_overflow_volume_gal"] += volume
+                if wet == "N":
+                    sig["has_dry_weather_overflow"] = 1
+                # most_recent_sewer_overflow_at: track the newest
+                # parseable start datetime. Falls back to start_raw
+                # only when we have nothing better — preserves the
+                # field for unparseable rows so they still surface.
+                if start_dt is not None:
+                    prev = sig["most_recent_sewer_overflow_at"]
+                    if not prev or start_raw > prev:
+                        sig["most_recent_sewer_overflow_at"] = start_raw
+                elif not sig["most_recent_sewer_overflow_at"]:
+                    sig["most_recent_sewer_overflow_at"] = start_raw
+
+                if type_codes:
+                    types_by_permit.setdefault(permit, set()).update(type_codes)
+
+                # ----- Per-event payload --------------------------------
+                # Map type code(s) to a single human-readable parameter
+                # for the violation_events.csv. Order of preference SSO
+                # > CSO > BYP matches the tier ordering — when an event
+                # carries multiple codes, the row reads as the most
+                # diagnostic.
+                if "SSO" in type_codes:
+                    parameter = "Sanitary Sewer Overflow"
+                elif "CSO" in type_codes:
+                    parameter = "Combined Sewer Overflow"
+                elif "BYP" in type_codes:
+                    parameter = "Bypass"
+                else:
+                    parameter = "Sewer Overflow"
+
+                # violation_description: structure + wet/dry tag so the
+                # viewer's event-detail row reads cleanly without the
+                # rep having to know what wet_weather_occurance_indicator
+                # means.
+                desc_parts = []
+                if structure:
+                    desc_parts.append(structure)
+                if wet == "N":
+                    desc_parts.append("dry-weather")
+                elif wet == "Y":
+                    desc_parts.append("wet-weather")
+                description = " — ".join(desc_parts) if desc_parts else ""
+
+                events.append({
+                    "violation_id": event_key,
+                    "registry_id": permit_to_registry.get(permit),
+                    "permit_id": permit,
+                    "npdes_id": permit,
+                    "program": "CWA",
+                    "violation_category": "Sewer Overflow / Bypass Event",
+                    "parameter": parameter,
+                    "dmr_value": (f"{volume:.0f}" if volume is not None else ""),
+                    "dmr_unit": "gallons" if volume is not None else "",
+                    "period_begin": start_raw,
+                    "period_end": end_raw,
+                    "violation_description": description,
+                    "status": "Unresolved",
+                    "data_lag_note": SEWER_LAG_NOTE,
+                })
+
+                if rows_scanned % 100_000 == 0:
+                    log.info("  Sewer overflow scanned %d rows, kept %d",
+                             rows_scanned, rows_kept)
+
+    # Finalize per-permit types text. Sorted for stable snapshot diffs
+    # (same convention as stream_attains_linkage's joins).
+    for permit, codes in types_by_permit.items():
+        out[permit]["recent_sewer_overflow_types"] = " | ".join(sorted(codes))
+
+    log.info("Sewer overflow events done: scanned %d rows, kept %d across "
+             "%d permits", rows_scanned, rows_kept, len(out))
     return out, events
 
 

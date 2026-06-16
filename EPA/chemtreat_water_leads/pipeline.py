@@ -194,6 +194,13 @@ CWA_LAG_NOTE = (
     "30 days) is incomplete."
 )
 
+SEWER_LAG_NOTE = (
+    "Sewer Overflow / Bypass event reporting began 2025-03 under the "
+    "NPDES eRule Phase 2. Coverage rolls on state-by-state as primacy "
+    "programs onboard; a facility with no events here may simply be in "
+    "a state that hasn't started reporting yet."
+)
+
 LAG_BANNER = """
 =====================================================================
   IMPORTANT: EPA DATA IS NOT REAL-TIME
