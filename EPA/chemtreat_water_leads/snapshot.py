@@ -311,9 +311,16 @@ def _create_sql() -> str:
     CREATE INDEX IF NOT EXISTS idx_violations_lastseen ON violations(last_seen);
 
     CREATE TABLE IF NOT EXISTS runs (
-        run_id     INTEGER PRIMARY KEY AUTOINCREMENT,
-        run_at     TEXT,
-        notes      TEXT
+        run_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_at            TEXT,
+        notes             TEXT,
+        -- Mirror of out/<run-folder>/run_health.json so dump_run can
+        -- materialize the file alongside all_leads.csv and the rest —
+        -- single uploadable folder for the viewer. Populated by both
+        -- bulk_loader.run_bulk and pipeline.run after write_run_health.
+        -- NULL on runs that pre-date the 2026-06-16 schema change;
+        -- dump_run handles that case gracefully.
+        run_health_json   TEXT
     );
 
     -- Per-row run membership. Records every (run_id, row-key) the upsert
@@ -355,6 +362,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         for col, decl in wanted.items():
             if col not in have:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    # `runs` schema grown 2026-06-16 to mirror run_health.json into the
+    # DB. Inlined rather than added to the dict-driven loop above because
+    # the table's PRIMARY KEY AUTOINCREMENT on run_id doesn't fit the
+    # FAC/VIOL_COLUMNS shape (those dicts list ALTER-eligible columns,
+    # and you can't ALTER TABLE ADD COLUMN with PRIMARY KEY).
+    runs_have = {r["name"] for r in conn.execute("PRAGMA table_info(runs)")}
+    if "run_health_json" not in runs_have:
+        conn.execute("ALTER TABLE runs ADD COLUMN run_health_json TEXT")
 
 
 @contextmanager
@@ -604,6 +619,33 @@ def record_run(conn: sqlite3.Connection,
         (now or _now_iso(), notes),
     )
     return cur.lastrowid
+
+
+def set_run_health(conn: sqlite3.Connection,
+                   run_id: int,
+                   run_health_json: str) -> None:
+    """Mirror the run_health.json contents into `runs.run_health_json`
+    so `dump_run` can materialize it alongside the CSVs. Idempotent —
+    can be called multiple times on the same run_id (last write wins).
+    Called by both bulk_loader.run_bulk and pipeline.run after
+    `_health.write_run_health` writes the on-disk copy."""
+    conn.execute(
+        "UPDATE runs SET run_health_json = ? WHERE run_id = ?",
+        (run_health_json, run_id),
+    )
+
+
+def get_run_health(conn: sqlite3.Connection, run_id: int) -> str | None:
+    """Return the JSON text mirrored into `runs.run_health_json`, or
+    None when absent (legacy runs that pre-date the 2026-06-16 schema
+    change, or runs killed before write_run_health fired)."""
+    row = conn.execute(
+        "SELECT run_health_json FROM runs WHERE run_id = ?",
+        (run_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return row["run_health_json"]
 
 
 # ----------------------------------------------------- CSV dumps

@@ -128,6 +128,78 @@ class TestMaterializeRun(unittest.TestCase):
         self.assertEqual(leads_hdr, snapshot.FAC_CSV_COLUMNS)
         self.assertEqual(viol_hdr, snapshot.VIOL_CSV_COLUMNS)
 
+    def test_run_health_materialized_when_mirrored(self):
+        """When `runs.run_health_json` is populated (as it is on any
+        bulk_loader / pipeline run since 2026-06-16), dump_run writes
+        it to `<out>/run_health.json` so the viewer-uploadable folder
+        is self-contained."""
+        sample_json = '{"schema_version": 2, "totals": {"leads": 2}}'
+        with snapshot.open_db(self.db) as conn:
+            snapshot.set_run_health(conn, self.run2, sample_json)
+            counts = dump_run.materialize_run(conn, self.run2, self.out)
+        health_file = self.out / "run_health.json"
+        self.assertTrue(health_file.exists(),
+            "dump_run did not write run_health.json")
+        # Byte-identical round-trip — we're not re-serializing, just
+        # mirroring the stored text.
+        self.assertEqual(health_file.read_text(encoding="utf-8"), sample_json)
+        self.assertEqual(counts.get("run_health.json"), 1)
+
+    def test_run_health_skipped_on_legacy_run(self):
+        """Runs created before the 2026-06-16 schema change have
+        run_health_json = NULL. dump_run must NOT write a stub file
+        or crash; it skips cleanly with a log line."""
+        # `_seed_two_runs` doesn't populate run_health_json — both
+        # runs are legacy by construction in this test.
+        with snapshot.open_db(self.db) as conn:
+            health = snapshot.get_run_health(conn, self.run2)
+            self.assertIsNone(health, "fixture should pre-date the mirror")
+            counts = dump_run.materialize_run(conn, self.run2, self.out)
+        self.assertFalse((self.out / "run_health.json").exists(),
+            "legacy runs should not emit a stub run_health.json")
+        self.assertNotIn("run_health.json", counts)
+
+
+class TestSetGetRunHealth(unittest.TestCase):
+    """Direct unit on the snapshot helpers — covers the round-trip and
+    the legacy-NULL contract independent of dump_run."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.db = self.tmp / "snap.sqlite"
+        # Create a fresh DB + one run row
+        with snapshot.open_db(self.db) as conn:
+            self.run_id = snapshot.record_run(conn, notes="t",
+                                               now="2026-06-16T08:00:00")
+
+    def test_get_returns_none_before_set(self):
+        with snapshot.open_db(self.db) as conn:
+            self.assertIsNone(snapshot.get_run_health(conn, self.run_id))
+
+    def test_round_trip_preserves_bytes(self):
+        """JSON gets stored and read back exactly — no re-serialization
+        round-trip changes whitespace, key order, or unicode escapes."""
+        text = '{"schema_version": 2, "warnings": ["é \\u00e9"]}'
+        with snapshot.open_db(self.db) as conn:
+            snapshot.set_run_health(conn, self.run_id, text)
+            got = snapshot.get_run_health(conn, self.run_id)
+        self.assertEqual(got, text)
+
+    def test_set_is_idempotent(self):
+        """Last write wins — re-calling set_run_health overwrites
+        without raising. Lets a retry / re-run land cleanly."""
+        with snapshot.open_db(self.db) as conn:
+            snapshot.set_run_health(conn, self.run_id, '{"v": 1}')
+            snapshot.set_run_health(conn, self.run_id, '{"v": 2}')
+            self.assertEqual(snapshot.get_run_health(conn, self.run_id),
+                             '{"v": 2}')
+
+    def test_get_returns_none_for_unknown_run(self):
+        with snapshot.open_db(self.db) as conn:
+            self.assertIsNone(snapshot.get_run_health(conn, 9999))
+
 
 class TestResolveRunId(unittest.TestCase):
 

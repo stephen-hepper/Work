@@ -2185,7 +2185,7 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
     today = datetime.utcnow().strftime("%Y%m%d")
     _write_csv(run_dir / f"newly_snc_{today}.csv", fac_diff["newly_snc"])
 
-    health_path = _health.write_run_health(
+    health_path, health_json = _health.write_run_health(
         run_dir,
         command="bulk_loader",
         states=states,
@@ -2200,7 +2200,14 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
         event_drilldown_min_score=EVENT_DRILLDOWN_MIN_SCORE,
         secondary_drilldown_min_score=SECONDARY_DRILLDOWN_MIN_SCORE,
     )
-    log.info("Wrote run health to %s", health_path)
+    # Mirror into the DB so dump_run can materialize it alongside the
+    # CSVs (single uploadable folder for the viewer). Separate
+    # connection to avoid holding the persistence block open longer
+    # than needed.
+    with snapshot.open_db(db_path) as conn:
+        snapshot.set_run_health(conn, run_id, health_json)
+    log.info("Wrote run health to %s (mirrored into runs.run_health_json)",
+             health_path)
 
     log.info("Bulk run complete: %d leads, %d events, %d new facilities, "
              "%d newly SNC, %d new violations.",
@@ -2208,8 +2215,9 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
              len(fac_diff["new"]), len(fac_diff["newly_snc"]),
              len(viol_diff["new"]))
     log.info("Run %d outputs in %s (run_health.json, newly_snc_*.csv). "
-             "To materialize all_leads.csv + violation_events.csv for the "
-             "viewer, run:  python -m chemtreat_water_leads.dump_run "
+             "To materialize the viewer-uploadable folder (all_leads.csv, "
+             "violation_events.csv, run_health.json), run:  "
+             "python -m chemtreat_water_leads.dump_run "
              "--db %s --run-id %d --out ./materialized/run_%d",
              run_id, run_dir, db_path, run_id, run_id)
     print(LAG_BANNER)
