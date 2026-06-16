@@ -1320,6 +1320,35 @@ const SEED_LEADS = [
     last_penalty_date: "2025-07-08", last_inspection_days_ago: 95, missing_dmr_quarters: 0,
     status: "Unresolved", newly_snc: false,
     echo_url: "https://echo.epa.gov/detailed-facility-report?fid=110000434910"
+  },
+  // POTW demo — pins the sewer-overflow / collection-system render
+  // path. Score breakdown matches the scoring guide tier ladder:
+  // SNC +40, SEVERE sewer overflow +15 (dry SSO 250K gal), CSS +5,
+  // medium population +7, 2 open events +10 = 77. NAICS 221320 is
+  // the POTW slice added to TARGET_NAICS alongside this integration.
+  {
+    lead_score: 77, score_reasons: "+40: Significant Non-Complier (SNC) | +15: 2 sewer overflow event(s); worst signature: dry-weather SSO ≥100K gal | +5: Operates a combined sewer system | +7: Serves 25,000 people | +10: 2 open violation event(s)",
+    program: "CWA", registry_id: "110000888001", company: "Springfield WWTP",
+    address: "880 Treatment Plant Rd", city: "Springfield", state: "IL", zip: "62701", county: "Sangamon",
+    naics: "221320", sic: "4952", permit_id: "IL0888888",
+    snc_status: "Significant/Category I Noncompliance", snc_status_date: "2026-04-30", snc_event: "Effluent - Collection System Overflow",
+    violation_status: "Yes", quarters_in_violation: "2", quarters_in_snc: "2",
+    compliance_history_13q: "VVSSSCCCCCCCC",
+    formal_actions_5yr: 1, informal_actions_5yr: 2, total_penalties_usd: 22000,
+    last_penalty_date: "2026-02-20", last_inspection_days_ago: 78, missing_dmr_quarters: 0,
+    status: "Unresolved", newly_snc: true,
+    // Sewer overflow signal — exercises every branch of renderSewerOverflowBlock.
+    recent_sewer_overflow_count: 2, recent_sewer_overflow_volume_gal: 255000,
+    most_recent_sewer_overflow_at: "2026-05-20 14:30:00",
+    recent_sewer_overflow_types: "CSO | SSO", has_dry_weather_overflow: 1,
+    // Collection-system enrollment — partial CSS, medium population.
+    percent_collection_system_css: 20, collection_system_population: 25000,
+    has_combined_sewer_system: 1,
+    // Tags so the new filter chips actually trip on this lead.
+    tag_active_snc: true, tag_recent_sewer_overflow: true, tag_recent_sso: true,
+    tag_dry_weather_overflow: true, tag_combined_sewer_system: true,
+    tag_chemtreat_high_relevance: true,
+    echo_url: "https://echo.epa.gov/detailed-facility-report?fid=110000888001"
   }
 ];
 
@@ -1349,7 +1378,14 @@ const SEED_EVENTS = [
   // Galveston Bay - Resolved
   { registry_id: "110000432200", program: "CWA", parameter: "Zinc, Total", limit_value: 0.5, dmr_value: 0.78, exceedance_pct: 56, period_end: "2025-10-31", status: "Resolved", data_lag_note: "CWA DMR data lags ~30-45 days" },
   // Susquehanna
-  { registry_id: "110000434910", program: "CWA", parameter: "BOD, 5-day", limit_value: 30, dmr_value: 52, exceedance_pct: 73, period_end: "2026-02-28", status: "Unresolved", data_lag_note: "CWA DMR data lags ~30-45 days" }
+  { registry_id: "110000434910", program: "CWA", parameter: "BOD, 5-day", limit_value: 30, dmr_value: 52, exceedance_pct: 73, period_end: "2026-02-28", status: "Unresolved", data_lag_note: "CWA DMR data lags ~30-45 days" },
+  // Springfield WWTP — sewer overflow events. violation_category
+  // "Sewer Overflow / Bypass Event" is what stream_sewer_overflow_
+  // events emits; the viewer's event renderer handles this category
+  // exactly like the others. dmr_value is gallons, dmr_unit "gallons"
+  // (matches the real streamer output shape).
+  { registry_id: "110000888001", program: "CWA", violation_category: "Sewer Overflow / Bypass Event", parameter: "Sanitary Sewer Overflow", dmr_value: 250000, dmr_unit: "gallons", period_end: "2026-05-15 13:00:00", violation_description: "Pump Station — dry-weather", status: "Unresolved", data_lag_note: "Sewer Overflow / Bypass event reporting began 2025-03 under the NPDES eRule Phase 2. Coverage rolls on state-by-state." },
+  { registry_id: "110000888001", program: "CWA", violation_category: "Sewer Overflow / Bypass Event", parameter: "Combined Sewer Overflow", dmr_value: 5000, dmr_unit: "gallons", period_end: "2026-05-20 15:00:00", violation_description: "Outfall — wet-weather", status: "Unresolved", data_lag_note: "Sewer Overflow / Bypass event reporting began 2025-03 under the NPDES eRule Phase 2. Coverage rolls on state-by-state." }
 ];
 
 /* ---------- State ---------- */
