@@ -1341,6 +1341,151 @@ def stream_sewer_overflow_events(
     return out, events
 
 
+def stream_collection_system_permits(
+    zip_path: Path,
+    kept_npdes_permits: set[str],
+) -> dict[str, dict]:
+    """Build per-permit collection-system signals from
+    `collection_system_permits.csv` inside the sewer-overflow events
+    zip. Static enrollment data — one row per (permit, collection-system
+    identifier).
+
+    Returns ``{npdes_id: {percent_collection_system_css: int,
+                          collection_system_population: int,
+                          has_combined_sewer_system: 0/1}}``.
+
+    Aggregation across multi-system permits (rare — ~30 of the 4,036
+    permits in the 2026-06-15 refresh have >1 system):
+      * `collection_system_population`: SUM across sub-systems. A POTW
+        whose collection network feeds 6 municipalities at 5K each is
+        a 30K-population account, not 5K — the rep cares about total
+        served.
+      * `percent_collection_system_css`: MAX across sub-systems. The
+        question the score asks is "does this permit operate ANY
+        combined sewer system?" — present in even one feeds the same
+        wet-weather-overflow risk that drives the +5 rule.
+      * `has_combined_sewer_system`: 1 if any sub-system has css_pct > 0.
+
+    Filter:
+      * `permit_identifier in kept_npdes_permits`. Same join key as
+        the events feed.
+    """
+    if not kept_npdes_permits:
+        log.info("No CWA permits in scope; skipping collection-system scan.")
+        return {}
+
+    out: dict[str, dict] = {}
+    rows_scanned = rows_matched = 0
+
+    with zipfile.ZipFile(zip_path) as zf:
+        names = {n.lower(): n for n in zf.namelist()}
+        target = names.get(_SEWER_PERMITS_CSV)
+        if target is None:
+            raise RuntimeError(
+                f"No {_SEWER_PERMITS_CSV} inside {zip_path.name}; EPA may "
+                "have renamed the file — check "
+                "https://echo.epa.gov/tools/data-downloads"
+            )
+        with zf.open(target) as raw_fh:
+            text_fh = io.TextIOWrapper(raw_fh, encoding="utf-8",
+                                       errors="replace")
+            for row in csv.DictReader(text_fh):
+                rows_scanned += 1
+                permit = row.get("permit_identifier")
+                if not permit or permit not in kept_npdes_permits:
+                    continue
+                rows_matched += 1
+                try:
+                    pop = int(float(row.get("collection_system_population") or 0))
+                except ValueError:
+                    pop = 0
+                try:
+                    css_pct = int(float(row.get("percent_collection_system_css") or 0))
+                except ValueError:
+                    css_pct = 0
+
+                sig = out.setdefault(permit, {
+                    "percent_collection_system_css": 0,
+                    "collection_system_population": 0,
+                    "has_combined_sewer_system": 0,
+                })
+                # SUM population (multi-system permits cover larger
+                # service areas; the score rule reads total served).
+                sig["collection_system_population"] += pop
+                # MAX css_pct (any one combined system flips the bit).
+                if css_pct > sig["percent_collection_system_css"]:
+                    sig["percent_collection_system_css"] = css_pct
+                if css_pct > 0:
+                    sig["has_combined_sewer_system"] = 1
+
+    log.info("Collection-system permits done: scanned %d rows, matched %d, "
+             "kept signal for %d permits",
+             rows_scanned, rows_matched, len(out))
+    return out
+
+
+def stream_cso_inventory(
+    zip_path: Path,
+    kept_npdes_permits: set[str],
+) -> dict[str, dict]:
+    """Build per-permit CSS signals from the National CSO Inventory
+    (`ALL_CSO_DOWNLOADS.csv`). Supplements
+    `stream_collection_system_permits` — covers ~649 CSO-system permits
+    in the 2026-06-15 refresh that the eRule-driven collection-system
+    data hasn't onboarded yet (older permits whose state hasn't started
+    reporting).
+
+    Returns ``{npdes_id: {has_combined_sewer_system: 1}}``.
+
+    File shape: one row per CSO outfall, many rows per permit. We only
+    need the existence of any matching row — every row in this file
+    documents a CSO outfall by definition, so presence == CSS POTW.
+
+    Filter:
+      * `NPDES_ID in kept_npdes_permits`. Note the column is uppercase
+        here (`NPDES_ID`) vs the eRule files' `permit_identifier` —
+        EPA's two feeds use different conventions. Both join to the
+        same NPDES permit-id space.
+    """
+    if not kept_npdes_permits:
+        log.info("No CWA permits in scope; skipping CSO inventory scan.")
+        return {}
+
+    out: dict[str, dict] = {}
+    rows_scanned = rows_matched = 0
+
+    with zipfile.ZipFile(zip_path) as zf:
+        target = next(
+            (n for n in zf.namelist()
+             if n.upper().endswith("ALL_CSO_DOWNLOADS.CSV")),
+            None,
+        )
+        if target is None:
+            raise RuntimeError(
+                f"No ALL_CSO_DOWNLOADS.csv inside {zip_path.name}; EPA may "
+                "have renamed the file — check "
+                "https://echo.epa.gov/tools/data-downloads"
+            )
+        with zf.open(target) as raw_fh:
+            text_fh = io.TextIOWrapper(raw_fh, encoding="utf-8",
+                                       errors="replace")
+            for row in csv.DictReader(text_fh):
+                rows_scanned += 1
+                permit = row.get("NPDES_ID")
+                if not permit or permit not in kept_npdes_permits:
+                    continue
+                rows_matched += 1
+                # Many rows per permit — set once, ignore subsequent
+                # matches. The signal is binary; we'd just be re-writing
+                # the same 1.
+                out.setdefault(permit, {"has_combined_sewer_system": 1})
+
+    log.info("CSO inventory done: scanned %d rows, matched %d outfalls, "
+             "kept signal for %d permits",
+             rows_scanned, rows_matched, len(out))
+    return out
+
+
 # ----------------------------------------------------- main pipeline
 
 def _load_prior_scores(db_path: Path) -> dict[tuple[str, str], int]:
