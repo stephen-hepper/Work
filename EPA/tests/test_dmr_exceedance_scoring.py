@@ -88,6 +88,36 @@ class TestRecentDmrExceedanceTiers(unittest.TestCase):
             {"top_exceedance_pct": 153})
         self.assertIn("153", reason)
 
+    def test_sentinel_pct_uses_pass_fail_reason(self):
+        """99999.0 is the bulk_loader display-clamp sentinel for EPA's
+        INT32_MAX-encoded "infinite over zero" values — surfaces on
+        either limit-of-zero rows (chlorine residual / seafood
+        processing) or pass/fail biological tests like Whole Effluent
+        Toxicity. Rendering "99999% over limit" misreads as a chemical-
+        concentration overage; the rule emits a parameter-aware
+        message instead. The tier weight is unchanged — the underlying
+        signal IS severe."""
+        pts, reason = scoring.rule_recent_dmr_exceedance({
+            "top_exceedance_pct": 99999,
+            "top_exceeded_parameter": "Toxicity, Chronic",
+        })
+        self.assertEqual(pts, scoring.WEIGHTS["dmr_exceedance_severe"])
+        self.assertIn("pass/fail or limit-of-zero", reason)
+        self.assertIn("Toxicity, Chronic", reason)
+        # And NOT the misleading "99999%" text.
+        self.assertNotIn("99999%", reason)
+        self.assertNotIn("99999 %", reason)
+
+    def test_sentinel_pct_without_param_still_renders(self):
+        """If the streamer didn't populate top_exceeded_parameter, the
+        reason still emits the pass/fail message cleanly — no trailing
+        parens or punctuation."""
+        pts, reason = scoring.rule_recent_dmr_exceedance(
+            {"top_exceedance_pct": 99999})
+        self.assertEqual(pts, scoring.WEIGHTS["dmr_exceedance_severe"])
+        self.assertIn("pass/fail or limit-of-zero", reason)
+        self.assertIn("(severe)", reason)
+
 
 class TestExceedsTreatableParameterRule(unittest.TestCase):
 

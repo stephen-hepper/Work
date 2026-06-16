@@ -333,12 +333,34 @@ def rule_recent_dmr_exceedance(f: dict):
       *   high: 200–1000% over — severe; enforcement likely already underway
       *   severe: >1000% over — egregious; treatment system probably failing
 
+    The severe tier has a special reason string for the sentinel value:
+    `bulk_loader` stores 99999.0 for either `limit=0` rows (e.g. chlorine
+    residual at a permit that bans any detectable residual) OR for pass/
+    fail biological assays like Whole Effluent Toxicity tests where EPA's
+    EXCEEDENCE_PCT computation has no real denominator. Rendering
+    "99999% over limit" misreads as a chemical-concentration overage; the
+    actual signal is a treatment-process failure on a non-continuous
+    parameter. Tier still fires (+15) because the underlying signal IS
+    severe — only the reason string changes.
+
     All weights and thresholds live in WEIGHTS. Bulk-only; pipeline.run
     (API path) doesn't pull DMR archives today."""
     pct = _safe_float(f.get("top_exceedance_pct"))
     if pct <= 0:
         return None
     if pct >= WEIGHTS["dmr_threshold_severe"]:
+        # 99999.0 is bulk_loader._DISPLAY_EXCEEDANCE_CAP — the sentinel
+        # for EPA's INT32_MAX-encoded "infinite over zero" values.
+        # Hardcoded with comment rather than imported because crossing
+        # the scoring/streamer boundary for one threshold isn't worth
+        # the coupling; a regression would surface in
+        # test_dmr_exceedance_scoring immediately.
+        if pct >= 99999.0:
+            param = (f.get("top_exceeded_parameter") or "").strip()
+            qualifier = f" ({param})" if param else ""
+            return (WEIGHTS["dmr_exceedance_severe"],
+                    "DMR pass/fail or limit-of-zero parameter failure"
+                    f"{qualifier} (severe)")
         return (WEIGHTS["dmr_exceedance_severe"],
                 f"DMR exceedance {pct:.0f}% over limit (severe)")
     if pct >= WEIGHTS["dmr_threshold_high"]:
