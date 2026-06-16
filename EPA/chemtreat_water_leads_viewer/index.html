@@ -900,6 +900,7 @@
   <div>
     <strong>EPA reporting lag:</strong>
     CWA data lags ~30&ndash;45 days &middot; SDWA data lags ~90 days.
+    Sewer overflow / bypass events: daily refresh, but reporting started 2025-03 under the NPDES eRule Phase 2 and rolls on state-by-state &mdash; an absent state means "hasn't started reporting," not "no problem."
     <strong>Always verify a facility's current status before outreach</strong> &mdash; a "Resolved" row means they've already fixed it.
   </div>
 </div>
@@ -993,7 +994,7 @@
     <div class="filter-group">
       <label>Min score</label>
       <div class="slider-row">
-        <input type="range" id="filterScore" min="0" max="180" step="5" value="0" />
+        <input type="range" id="filterScore" min="0" max="220" step="5" value="0" />
         <span class="slider-value" id="filterScoreValue">0</span>
       </div>
     </div>
@@ -1020,6 +1021,15 @@
       <div class="chip-group" id="filterActiveCompliance">
         <label class="chip" title="Facility has at least one Discharge Monitoring Report exceedance in the loaded fiscal year — they're currently over a permit limit for some parameter."><input type="checkbox" value="recent_exceedance" /> Currently exceeding a permit limit</label>
         <label class="chip" title="Facility is permitted on AND currently exceeding the same ChemTreat-treatable parameter class. The strongest single signal in the system — sales call writes itself."><input type="checkbox" value="exceeds_treatable_parameter" /> Exceeding our chemistry parameter</label>
+      </div>
+    </div>
+    <div class="filter-group">
+      <label>Sewer overflow / bypass</label>
+      <div class="chip-group" id="filterSewer">
+        <label class="chip" title="POTW has reported at least one sewer overflow or bypass event in the last 365 days. Daily-cadence signal — fresher than DMR or SNC."><input type="checkbox" value="recent_sewer_overflow" /> Recent sewer overflow</label>
+        <label class="chip" title="Sanitary Sewer Overflow specifically. Raw sewage where it shouldn't be — almost always a treatment-process failure."><input type="checkbox" value="recent_sso" /> Sanitary sewer overflow (SSO)</label>
+        <label class="chip" title="At least one overflow event occurred in dry weather. Wet-weather CSOs are often designed behavior at older POTWs; dry-weather overflows mean the treatment train is failing."><input type="checkbox" value="dry_weather_overflow" /> Dry-weather overflow</label>
+        <label class="chip" title="Permit operates a combined sewer system (storm + sanitary in the same pipe). Long-term POTW lead identity — these overflow more in wet weather. Includes permits in the National CSO Inventory even when the eRule data hasn't onboarded them yet."><input type="checkbox" value="combined_sewer_system" /> Combined sewer system</label>
       </div>
     </div>
     <div class="filter-group">
@@ -1354,6 +1364,13 @@ let isDemoData = true;
 let activeTab = "inventory";
 
 /* ---------- Helpers ---------- */
+// Thresholds 110/80/60/40 are pre-DMR-integration values. The DMR
+// signal landed top scores up to 187; the CSO/SSO integration can
+// stack another +25-30 on a POTW with SEVERE sewer signal +
+// large-population +5 CSS. The outlier band is overdue for a re-bump
+// — see TODO.md "Re-tier viewer color thresholds." Pinned here so
+// the re-baseline happens against the post-CSO/SSO distribution
+// instead of being done piecemeal.
 function scoreClass(s) {
   if (s >= 110) return "s110";   // outlier: facility + event rules stacking
   if (s >= 80)  return "s80";
@@ -1786,9 +1803,13 @@ function getFilters() {
   // The two chip groups feed the same tagTrue() helper; values map to
   // tag_<value> column names.
   const activeCompliance = Array.from(document.querySelectorAll("#filterActiveCompliance input:checked")).map(c => c.value);
+  // Sewer overflow / bypass + combined-sewer-system chips. Same AND-
+  // semantics as the other two tag-chip groups; values map to tag_<value>
+  // column names.
+  const sewer = Array.from(document.querySelectorAll("#filterSewer input:checked")).map(c => c.value);
   const search = document.getElementById("filterSearch").value.trim().toLowerCase();
   return { states, program, minScore, statuses: statusBoxes,
-           preViolation, activeCompliance, search };
+           preViolation, activeCompliance, sewer, search };
 }
 
 // Tags persist through CSV as "True"/"False" strings; in the seed data
@@ -1813,6 +1834,12 @@ function applyFilters(rows) {
     }
     if (f.activeCompliance.length) {
       for (const sig of f.activeCompliance) {
+        const col = "tag_" + sig;
+        if (!tagTrue(r[col])) return false;
+      }
+    }
+    if (f.sewer.length) {
+      for (const sig of f.sewer) {
         const col = "tag_" + sig;
         if (!tagTrue(r[col])) return false;
       }
@@ -1962,6 +1989,75 @@ function renderActiveComplianceBlock(r) {
     </div>`;
 }
 
+// Sewer overflow / bypass block. CWA/POTW-only signal; silently
+// disappears when no sewer-overflow data has been merged onto the
+// lead (either non-POTW permits, or POTW permits in states that
+// haven't onboarded eRule Phase 2 reporting yet).
+//
+// Bolded "Recent SSO" and "dry-weather" labels are the diagnostic
+// signatures — sales should treat those rows as treatment-failure
+// leads, not designed-CSO leads.
+function renderSewerOverflowBlock(r) {
+  const count = Number(r.recent_sewer_overflow_count || 0);
+  const hasCss = tagTrue(r.has_combined_sewer_system);
+  // Block earns its keep when EITHER signal is present. CSS-only rows
+  // (no recent events) still surface so the rep sees the long-term
+  // POTW identity.
+  if (!count && !hasCss) return "";
+  const rows = [];
+  if (count) {
+    const volume = Number(r.recent_sewer_overflow_volume_gal || 0);
+    const volStr = volume > 0
+      ? `${volume.toLocaleString(undefined,{maximumFractionDigits:0})} gal total`
+      : "volume not reported";
+    rows.push(
+      `<div class="k">Recent events (365d)</div>` +
+      `<div class="v">${count} event(s) &mdash; ${volStr}</div>`);
+    const types = (r.recent_sewer_overflow_types || "").trim();
+    if (types) {
+      const hasSSO = types.includes("SSO");
+      rows.push(
+        `<div class="k">Event types</div>` +
+        `<div class="v"${hasSSO ? ' style="font-weight:600;"' : ""}>${escapeHtml(types)}${hasSSO ? " (raw sewage)" : ""}</div>`);
+    }
+    const mostRecent = (r.most_recent_sewer_overflow_at || "").trim();
+    if (mostRecent) rows.push(
+      `<div class="k">Most recent</div>` +
+      `<div class="v">${escapeHtml(mostRecent)}</div>`);
+    if (tagTrue(r.has_dry_weather_overflow)) rows.push(
+      `<div class="k">Dry-weather event</div>` +
+      `<div class="v" style="font-weight:600;">Yes &mdash; treatment-process failure indicator</div>`);
+  }
+  if (hasCss) {
+    const popRaw = r.collection_system_population;
+    const popNum = (popRaw === undefined || popRaw === null || popRaw === "")
+      ? null : Number(popRaw);
+    const popOk = popNum !== null && Number.isFinite(popNum) && popNum > 0;
+    if (popOk) rows.push(
+      `<div class="k">Collection system population</div>` +
+      `<div class="v">${popNum.toLocaleString()} people</div>`);
+    const cssPctRaw = r.percent_collection_system_css;
+    const cssPctNum = (cssPctRaw === undefined || cssPctRaw === null || cssPctRaw === "")
+      ? null : Number(cssPctRaw);
+    if (cssPctNum !== null && Number.isFinite(cssPctNum) && cssPctNum > 0) {
+      rows.push(
+        `<div class="k">Combined sewer share</div>` +
+        `<div class="v">${cssPctNum}% combined (rest sanitary-only)</div>`);
+    } else {
+      // CSS flag is on but eRule data didn't carry a percentage —
+      // i.e. the flag came from the National CSO Inventory feed alone.
+      rows.push(
+        `<div class="k">Combined sewer system</div>` +
+        `<div class="v">Listed in National CSO Inventory</div>`);
+    }
+  }
+  return `
+    <div style="margin-top:14px;">
+      <h3 style="margin-bottom:4px;">Sewer overflow &amp; collection system</h3>
+      <div class="compliance-grid">${rows.join("")}</div>
+    </div>`;
+}
+
 // SDWA system-context block. Renders the PWS-side identity columns the
 // API path now exposes (population_served, system_type, owner_type,
 // primary_source). For CWA leads and for bulk-only SDWA leads (where
@@ -2044,6 +2140,7 @@ function renderDetail(r) {
       ${renderSdwaContextBlock(r)}
       ${renderPreViolationBlock(r)}
       ${renderActiveComplianceBlock(r)}
+      ${renderSewerOverflowBlock(r)}
     </div>
     <div>
       <h3>Recent violation events</h3>
@@ -2560,6 +2657,11 @@ document.getElementById("filterActiveCompliance").addEventListener("change", e =
   if (chip) chip.classList.toggle("active", e.target.checked);
   render();
 });
+document.getElementById("filterSewer").addEventListener("change", e => {
+  const chip = e.target.closest(".chip");
+  if (chip) chip.classList.toggle("active", e.target.checked);
+  render();
+});
 document.getElementById("filterSearch").addEventListener("input", render);
 
 document.getElementById("uploadBtn").addEventListener("click", () => {
@@ -2906,41 +3008,62 @@ compare current state to the DB and emit four change sets:
 
 Score increases of >10 points are also tagged on the all-leads output.
 
-### Step 5–6 — Update DB, write CSVs
+### Step 5–6 — Update DB, write outputs
 
 Each run writes into its own subfolder of `--out`, named
 `<command>_<scope>_<YYYYMMDD-HHMMSS>` (e.g.
 `out/bulk_nationwide_20260527-090000/`), so runs never overwrite each
 other — a targeted `pipeline` run leaves a prior nationwide `bulk` run's
 files intact. The folder path is logged at the end of the run. See
-`RATIONALE.md` ("Per-run output folders") for why. Three primary outputs
-per run, inside that folder:
+`RATIONALE.md` ("Per-run output folders") for why.
 
-- `all_leads.csv` — full ranked inventory. Columns include the score
-  and breakdown, the `outreach_posture` string, the seven `tag_*`
-  booleans, normalized facility identity / location / NAICS, the SNC
-  text and dates, quarter counts, formal action counts, total
-  penalties, the 13-quarter compliance history, and an `echo_url`
-  pointing back at EPA's facility page.
-- `violation_events.csv` — the underlying DMR exceedances (CWA) and
-  per-violation rows from the SDWA DFR. Includes status, period dates,
-  the resolved date, federal/state MCL where applicable, and a
-  `data_lag_note` so a row read in isolation still carries the caveat.
-- `new_*.csv` — the daily changeset (`new_facilities`, `newly_snc`,
-  `new_violations`). This is what the sales team should actually look
-  at each morning — the standing inventory has dozens of inches of
-  scroll, the changeset is the few rows that matter today.
+`snapshot.sqlite` is the source of truth; the run folder holds only the
+artifacts that can't be reconstructed from the DB:
+
 - `run_health.json` — structured snapshot of the run (totals, drill-down
   stats, per-state coverage gaps, warnings). The viewer's Run Health
   tab consumes this to surface signals (terminal warnings, coverage
   gaps, suggested follow-up commands) to non-technical readers who
-  never look at the log. One per run folder.
+  never look at the log.
+- `newly_snc_YYYYMMDD.csv` — facilities that just crossed into
+  Significant Non-Complier. Needs the *prior* `snc_flag` value, which
+  the upsert overwrites — can't be reconstructed after the run.
+  Skipped if the diff is empty.
 
-A separate viewer at `../chemtreat_water_leads_viewer/index.html` is a
-single-page HTML app for browsing these CSVs. It reads
-`outreach_posture` directly and renders the status pills, "do not
-call" affordance, and filter chips off it. See
-`chemtreat_water_leads_viewer/RATIONALE.md` for design notes.
+The standing-inventory and diff CSVs are materialized on demand from
+the DB by `dump_run`:
+
+```bash
+python -m chemtreat_water_leads.dump_run --db ./snapshot.sqlite --latest \
+    --out ./materialized/run_latest
+# or pick a specific run:
+python -m chemtreat_water_leads.dump_run --db ./snapshot.sqlite --run-id 42 \
+    --out ./materialized/run_42
+# or list recent runs:
+python -m chemtreat_water_leads.dump_run --db ./snapshot.sqlite --list
+```
+
+That produces:
+
+- `all_leads.csv` — full ranked inventory. Columns include the score
+  and breakdown, the `outreach_posture` string, the `tag_*` booleans,
+  normalized facility identity / location / NAICS, the SNC text and
+  dates, quarter counts, formal action counts, total penalties, the
+  13-quarter compliance history, and an `echo_url`.
+- `violation_events.csv` — the underlying DMR exceedances (CWA) and
+  per-violation rows from the SDWA DFR. Includes status, period dates,
+  the resolved date, federal/state MCL where applicable, and a
+  `data_lag_note` so a row read in isolation still carries the caveat.
+- `new_facilities.csv` — facilities whose first-ever membership row is
+  in this run (i.e. brand-new to the inventory).
+- `new_violations.csv` — same first-appearance semantics for events.
+
+The end-of-run log prints the exact `dump_run` command for the run
+that just finished. A separate viewer at
+`../chemtreat_water_leads_viewer/index.html` is a single-page HTML
+app for browsing these materialized CSVs plus the inline
+`run_health.json`. See `chemtreat_water_leads_viewer/RATIONALE.md`
+for design notes.
 
 ---
 
@@ -2968,7 +3091,8 @@ To make this hard to miss, the lag is surfaced in **four places**:
 
 1. **Console banner** printed at the start and end of every run.
 2. **`data_lag_note` column** on every event row in the violation CSV.
-3. **`READ_ME_FIRST.txt`** written to the output directory each run.
+3. **Sticky yellow banner** at the top of the viewer page that can't
+   be dismissed.
 4. **This README section.**
 
 ## Other caveats — things to tell your team
@@ -3019,8 +3143,9 @@ violation rows (which is the common case). `--no-events` makes the
 run fully offline — zero EPA API calls, zero event-zip downloads.
 
 See `RATIONALE.md` for the design choices behind per-program shapes,
-the three-trigger drill-down candidate set, and the SQLite-as-source-
-of-truth contract.
+the drill-down candidate selection (three positive triggers plus an
+un-actionable-SNC gate and a per-row backoff window), and the
+SQLite-as-source-of-truth contract.
 
 See **`COMMANDS.md`** for the full command reference with realistic
 time estimates, first-run vs later-run differences, daily-cron patterns,
@@ -3155,7 +3280,7 @@ Computed for **every** lead, from the summary columns EPA returns in the
 facility listing (`get_qid` for the API path, ECHO Exporter columns for
 bulk). No per-violation detail; just counts and flags.
 
-`scoring.RULES` (11 rules):
+`scoring.RULES` (14 rules):
 
 | Rule | Points | Fires on |
 |---|---|---|
@@ -3169,6 +3294,9 @@ bulk). No per-violation detail; just counts and flags.
 | `rule_discharges_to_impaired` | 10 or 15 | `discharges_to_impaired=1` (any AU impaired) → +10; `matching_impaired_parameters` populated (effluent matches impairment cause) → +15 instead (no double-counting). Bulk-only, from `npdes_attains_downloads.zip`. |
 | `rule_recent_dmr_exceedance` | 5/8/10/12/15 | Tiered by `top_exceedance_pct` at thresholds 50 / 100 / 200 / 1000%. Bulk-only, from `npdes_dmrs_fy<YEAR>.zip`. |
 | `rule_exceeds_treatable_parameter` | 15 | Composite: any class in `exceeded_treatable_parameters_text` is also in `permit_has_*`. The strongest single signal in the system — "permit covers it AND they're exceeding it." Bulk-only. |
+| `rule_recent_sewer_overflow` | 5 / 8 / 12 / 15 | Tiered on (event type × wet/dry × volume) over the last 365 days. SEVERE = dry-weather SSO ≥ 100K gal OR any event ≥ 1M gal; HIGH = any SSO or dry-weather ≥ 100K gal; MODERATE = ≥ 10K gal or any dry-weather event; MINOR = any event in window. Daily-cadence active-compliance signal from the eRule Phase 2 feed. Bulk-only, CWA/POTW-only. |
+| `rule_combined_sewer_system` | 5 | Flat bump when `has_combined_sewer_system=1` (eRule data OR National CSO Inventory). Long-term POTW lead identity — CSS POTWs overflow more in wet weather, so this stacks with `rule_recent_sewer_overflow` by design. Bulk-only. |
+| `rule_collection_system_population` | 4 / 7 / 10 | Tiered by `collection_system_population` at 3K / 10K / 50K. CWA-side revenue proxy for POTWs — mirrors `rule_population_served` thresholds. Bulk-only. |
 | `rule_population_served` | 4 / 7 / 10 | Tiered by `PopulationServedCount` at 3K / 10K / 50K. Revenue proxy for SDWA — a major utility is a much bigger account than a 200-person mobile-home park. **API-only** (ECHO Exporter doesn't carry PWS metadata; the rule returns None on bulk SDWA rows). |
 
 All weights and tier thresholds live in the `WEIGHTS` dict at the top
@@ -3577,22 +3705,44 @@ Each run writes into its own subfolder of the output directory, named
 `<command>_<scope>_<YYYYMMDD-HHMMSS>` (e.g.
 `out/bulk_nationwide_20260527-090000/` or
 `out/pipeline_WA-AL-VA-LA-GA_20260527-121500/`). Runs never overwrite
-each other — a targeted `pipeline` run leaves an earlier `bulk` run's
-files untouched. The path is printed at the end of each run. Inside that
-folder:
+each other. The path is printed at the end of each run. Inside that
+folder are ONLY the artifacts that can't be reconstructed from the DB:
 
 | File | Purpose | Updates |
 |---|---|---|
-| `READ_ME_FIRST.txt` | Lag warning. Open first. | One per run folder |
-| `all_leads.csv` | Full ranked inventory of current violators | One per run folder |
-| `violation_events.csv` | Underlying individual DMR / SDWA events | One per run folder |
-| `run_health.json` | Run metadata + warnings + coverage/depth signals for the viewer's Run Health tab | One per run folder |
-| `new_facilities_YYYYMMDD.csv` | Facilities first seen this run | One per run folder |
-| `newly_snc_YYYYMMDD.csv` | Facilities that crossed into Significant Non-Complier since last run | One per run folder |
-| `new_violations_YYYYMMDD.csv` | Individual new violation events since last run | One per run folder |
+| `run_health.json` | Run metadata + warnings + coverage/depth signals for the viewer's Run Health tab. Captures run-time observations (throttle events, bot-blocks, gate stats) that are gone once the run ends. | One per run folder |
+| `newly_snc_YYYYMMDD.csv` | Facilities that crossed into Significant Non-Complier since the prior run. Needs the *prior* `snc_flag` value, which the upsert overwrites — so it can't be reconstructed later. | One per run folder (skipped if empty) |
 
-The `new_*` files are what sales actually opens each morning. The
-`all_leads.csv` is the standing inventory for territory planning.
+Everything else (`all_leads.csv`, `violation_events.csv`,
+`new_facilities.csv`, `new_violations.csv`) is materialized on demand
+from `snapshot.sqlite` via:
+
+```bash
+# Latest run
+python -m chemtreat_water_leads.dump_run --db ./snapshot.sqlite --latest \
+    --out ./materialized/run_latest
+
+# A specific run_id (use --list to see them)
+python -m chemtreat_water_leads.dump_run --db ./snapshot.sqlite --run-id 42 \
+    --out ./materialized/run_42
+
+# Show recent runs with touched-row counts
+python -m chemtreat_water_leads.dump_run --db ./snapshot.sqlite --list
+```
+
+The end-of-run log for both `bulk_loader` and `pipeline` prints the
+exact `dump_run` command for the run that just finished. The
+materialized CSVs use the same column shape and serialization the
+old inline writes used, so the viewer's auto-detect doesn't care
+whether a file came from inline write or `dump_run`.
+
+**Why this split.** `snapshot.sqlite` is the source of truth — the
+membership tables (`run_facility_membership`,
+`run_violation_membership`) let any past run be reconstructed
+exactly. Writing the same data inline every run was ~15-50 MB of
+redundant cache per run folder. Dropping it makes "DB is canonical"
+explicit and sets up the eventual Snowflake migration where the
+viewer will query the warehouse directly.
 
 ### Columns sales filters on
 
@@ -3674,10 +3824,12 @@ schedules:
   in a territory (e.g. a Run Health "lookup_failed" gap).
 
 The HTML viewer in `../chemtreat_water_leads_viewer/index.html` reads
-these columns directly — open it in a browser and use the Upload CSV
-button to load `all_leads.csv` (and optionally `violation_events.csv`)
-from the run folder you want to view. The viewer shows one run at a
-time; to compare a nationwide run against a targeted one, upload each
+these columns directly — first materialize the run you want with
+`dump_run --latest --out <dir>`, then open the viewer in a browser and
+use the Upload CSV button to load `all_leads.csv`,
+`violation_events.csv`, and the original run folder's `run_health.json`.
+The viewer shows one run at a time; to compare a nationwide run against
+a targeted one, materialize each into a separate folder and upload each
 in turn.
 
 ---
