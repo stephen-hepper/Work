@@ -145,7 +145,7 @@ runs reuse them for 7 days. Look for the end-of-run log line:
 
 ```
 Run N outputs in out/bulk_nationwide_<stamp> (run_health.json, newly_snc_*.csv).
-To materialize all_leads.csv + violation_events.csv for the viewer, run:
+To materialize the viewer-uploadable folder (all_leads.csv, violation_events.csv, run_health.json), run:
   python -m chemtreat_water_leads.dump_run --db ./snapshot.sqlite --run-id N --out ./materialized/run_N
 ```
 

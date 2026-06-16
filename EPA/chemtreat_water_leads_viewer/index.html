@@ -3016,21 +3016,31 @@ dataset.
 In addition to the score, every row gets two view-builders worth of
 output for sales-side filtering:
 
-- **Tags** (`scoring.compute_tags`): twelve booleans organized into three classes —
-  - *Event-driven (5):* `tag_active_snc`, `tag_treatment_technique`,
+- **Tags** (`scoring.compute_tags`): sixteen booleans organized into four classes plus a composite —
+  - *Event-driven (5+1 guardrail):* `tag_active_snc`, `tag_treatment_technique`,
     `tag_mcl_violation`, `tag_lead_copper`, `tag_major_facility`,
     plus the do-not-call guardrail `tag_only_resolved_events`.
   - *Pre-violation (3):* `tag_treatable_permit`,
     `tag_discharges_to_impaired`, `tag_impairment_parameter_match` —
     populated from `npdes_limits.zip` + `npdes_attains_downloads.zip`.
     Bulk-only.
-  - *Active-compliance (2):* `tag_recent_exceedance`,
+  - *Active-compliance — DMR (2):* `tag_recent_exceedance`,
     `tag_exceeds_treatable_parameter` — populated from
     `npdes_dmrs_fy<YEAR>.zip`. Bulk-only. The composite is the
     strongest single signal in the system.
+  - *Active-compliance — Sewer (3) + CSS (1):* `tag_recent_sewer_overflow`,
+    `tag_recent_sso`, `tag_dry_weather_overflow`, `tag_combined_sewer_system` —
+    populated from the eRule Phase 2 sewer-overflow events feed +
+    the National CSO Inventory. Bulk-only, CWA/POTW-only. SSO + dry-
+    weather signatures are the strongest pair in this class
+    (treatment-process failure indicators). The CSS tag is
+    intentionally NOT in the composite below because it's common
+    enough (~hundreds of permits) to inflate the "pare 7K rows to
+    50" purpose — earns its keep as a standalone filter chip.
   - *Composite (1):* `tag_chemtreat_high_relevance` — OR-includes
-    every positive signal above, AND-excludes
-    `tag_only_resolved_events` (the do-not-call guardrail).
+    every positive signal above EXCEPT `tag_combined_sewer_system`,
+    AND-excludes `tag_only_resolved_events` (the do-not-call
+    guardrail).
   Sales filters in Excel on these to pare 7,000 rows into the 50
   they want without parsing reason strings.
 - **`outreach_posture`** (`scoring.compute_outreach_posture`): one word
@@ -3490,7 +3500,9 @@ python -m chemtreat_water_leads.pipeline \
 
 Internally, both commands re-call `scoring.score_facility(raw, events)`
 on each drilled lead. Pass 2 also recomputes the `outreach_posture`
-string and the seven `tag_*` boolean columns; see
+string and the sixteen `tag_*` boolean columns (event-driven, pre-
+violation, active-compliance DMR, active-compliance sewer/POTW, plus
+the `tag_chemtreat_high_relevance` composite); see
 `scoring.compute_outreach_posture` and `scoring.compute_tags`.
 
 ---
@@ -3657,21 +3669,26 @@ python -m chemtreat_water_leads.bulk_loader \
     --cache ./cache
 ```
 
-This downloads three EPA bulk files (cached for 7 days, matching EPA's
-weekly refresh cadence), stream-filters them, and produces the same
-output shape as the API pipeline.
+This downloads eight EPA bulk files (cached per-feed: 7 days for the
+weekly-refresh feeds, 1 day for the daily-refresh sewer-overflow events
+feed). Streamers filter them, and the run produces the same output
+shape as the API pipeline.
 
 **First run:** **~10–20 min total.**
 
-- Download `echo_exporter.zip` (~250 MB): 1–5 min depending on connection
+- Download `echo_exporter.zip` (~423 MB): 1–5 min depending on connection
 - Stream-filter 1.5M facility rows: 1–3 min
-- Download `npdes_downloads.zip` (~80 MB): 30s–2 min
+- Download `npdes_limits.zip` (~490 MB) + `npdes_attains_downloads.zip` (~99 MB) + `npdes_dmrs_fy<YEAR>.zip` (~344 MB): 2–5 min
+- Stream-filter pre-violation + DMR signals: 1–3 min
+- Download `current_sewer_overflow_and_collection_systems_tables.zip` (~1 MB, **daily**) + `ALL_CSO_downloads.zip` (~300 KB): seconds
+- Download `npdes_downloads.zip` (~327 MB): 30s–2 min
 - Read NPDES violation events: 1–3 min
-- Download `SDWA_latest_downloads.zip` (~40 MB): 15s–1 min
+- Download `SDWA_latest_downloads.zip` (~499 MB): 15s–1 min
 - Read SDWA violation events: <1 min
 
-**Later runs (within 7 days):** **~3–10 min.** Zips are cached and
-re-used. Only the parse/filter/diff work runs.
+**Later runs (within 7 days):** **~3–10 min.** Most zips are cached
+and re-used. The sewer-overflow events feed re-downloads daily; the
+rest weekly. Only the parse/filter/diff work runs on cache hits.
 
 **Later runs (after 7 days):** back to first-run timing because the
 cache invalidates.
@@ -3931,10 +3948,13 @@ The HTML viewer in `../chemtreat_water_leads_viewer/index.html` reads
 these columns directly — first materialize the run you want with
 `dump_run --latest --out <dir>`, then open the viewer in a browser and
 use the Upload CSV button to load `all_leads.csv`,
-`violation_events.csv`, and the original run folder's `run_health.json`.
-The viewer shows one run at a time; to compare a nationwide run against
-a targeted one, materialize each into a separate folder and upload each
-in turn.
+`violation_events.csv`, and `run_health.json` — all from the same
+materialized folder (since 2026-06-16 `dump_run` mirrors `run_health.json`
+out of `runs.run_health_json`; runs that pre-date that schema change
+still need the JSON grabbed from `out/<run-folder>/` separately, and
+`dump_run`'s CLI tells you so when it skips). The viewer shows one run
+at a time; to compare a nationwide run against a targeted one,
+materialize each into a separate folder and upload each in turn.
 
 ---
 

@@ -323,8 +323,11 @@ the bulk files weekly, so the cache invalidates automatically:
 This time the `new_*` files inside the materialized folder are the
 interesting ones — they hold only what changed since the prior run. Re-run
 `dump_run --latest --out ./materialized/run_latest` to refresh the
-materialized CSVs against the new run, grab the latest `run_health.json`
-from the new `out/<run-folder>/`, and upload to the viewer the same way.
+materialized CSVs against the new run. Since 2026-06-16 `dump_run` also
+materializes `run_health.json` into the same folder (mirrored from
+`runs.run_health_json` in the DB), so you upload three files all from
+`materialized/run_latest/` — no longer need to grab the JSON from
+`out/<run-folder>/` separately.
 
 **Critical rule:** never delete `snapshot.sqlite`. It's the diff
 baseline. If you delete it, the next run treats every facility as

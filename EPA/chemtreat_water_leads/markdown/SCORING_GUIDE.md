@@ -136,7 +136,9 @@ python -m chemtreat_water_leads.pipeline \
 
 Internally, both commands re-call `scoring.score_facility(raw, events)`
 on each drilled lead. Pass 2 also recomputes the `outreach_posture`
-string and the seven `tag_*` boolean columns; see
+string and the sixteen `tag_*` boolean columns (event-driven, pre-
+violation, active-compliance DMR, active-compliance sewer/POTW, plus
+the `tag_chemtreat_high_relevance` composite); see
 `scoring.compute_outreach_posture` and `scoring.compute_tags`.
 
 ---

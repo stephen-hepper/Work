@@ -27,9 +27,10 @@ newly-discovered / score-jumped leads.
 
 ## Bulk path — `echo.epa.gov/files/echodownloads/`
 
-Lives in `bulk_loader.BULK_URLS`. Six weekly-refreshed zips, ~2.2 GB
-compressed total. None of the unzipped data ever lands in memory whole —
-every streamer uses `csv.DictReader` over a `zipfile.open()` handle.
+Lives in `bulk_loader.BULK_URLS`. Eight zips, mostly weekly refresh,
+~2.2 GB compressed total. None of the unzipped data ever lands in
+memory whole — every streamer uses `csv.DictReader` over a
+`zipfile.open()` handle.
 
 | Zip | Compressed | Unzipped | What it produces | Refresh cadence | Reporting lag |
 |---|---|---|---|---|---|
@@ -39,9 +40,13 @@ every streamer uses `csv.DictReader` over a `zipfile.open()` handle.
 | `npdes_limits.zip` | ~490 MB | ~7.2 GB | NPDES permit limits — what each permit *allows* (powers `permit_has_*` and `rule_treatable_permit_parameter`) | Weekly | Permits move slowly (~5-yr renewal cycle) so lag isn't meaningful here |
 | `npdes_attains_downloads.zip` | ~99 MB | ~570 MB | NPDES↔ATTAINS 303(d) catchment linkage (powers `discharges_to_impaired` / `matching_impaired_parameters` / `rule_discharges_to_impaired`) | Weekly | ATTAINS assessments turn over on state cycles, typically every 2 yr (federal Integrated Reporting cycle) |
 | `npdes_dmrs_fy2026.zip` | ~344 MB | ~5 GB | Per-DMR submissions with `EXCEEDENCE_PCT` (CWA per-DMR depth; powers `top_exceedance_pct`, `rule_recent_dmr_exceedance`, `rule_exceeds_treatable_parameter`) | Weekly for current FY; older FYs frozen | ~30–45 days |
+| `current_sewer_overflow_and_collection_systems_tables.zip` | ~1 MB | ~4 MB | Sewer overflow / bypass events + collection-system enrollment (powers `recent_sewer_overflow_*`, `has_dry_weather_overflow`, `percent_collection_system_css`, `collection_system_population`, `rule_recent_sewer_overflow`, `rule_combined_sewer_system`, `rule_collection_system_population`) | **Daily** (per-feed cache age override; see `_download_cached(max_age_days=1)`) | Sub-day for reporting states; coverage rolls on state-by-state since 2025-03 under NPDES eRule Phase 2 |
+| `ALL_CSO_downloads.zip` | ~300 KB | ~4 MB | National CSO Inventory — supplemental CSS membership for ~649 permits the eRule data hasn't onboarded yet (powers `has_combined_sewer_system` OR-merge) | Weekly | Inventory is largely static (CSO outfalls turn over slowly) |
 
-**Local cache:** Downloaded zips are kept in `--cache` for 7 days (matches
-EPA's weekly cadence). After 7 days the next run re-downloads.
+**Local cache:** Downloaded zips are kept in `--cache` for 7 days by
+default (matches EPA's weekly cadence). The sewer-overflow events feed
+overrides to 1 day so its daily cadence reaches the lead rows. After
+the cache window elapses the next run re-downloads.
 
 **Bulk path's NPDES SE / PS / CS files:** `npdes_downloads.zip` contains
 three sibling CSVs we read together — Single-Event effluent exceedances
@@ -70,7 +75,6 @@ Tracked in `EXTERNAL_DATA_STATUS.md`. Status as of 2026-06:
 
 | # | Source | Tier | Why we want it | Status |
 |---|---|---|---|---|
-| 4 | Sewer Overflow / CSO / SSO events | Tier-1 | **Daily** refresh cadence — the only EPA water dataset that collapses the 30–90d lag. POTW lead signal. | Not started |
 | 5 | TRI Surface Water Releases | Tier-1 | Annual per-facility per-chemical lb/yr to surface water + POTW transfers. Joins on FRS RegistryID. | Not started |
 | 6 | UCMR5 PFAS Occurrence | Tier-2 | PWSID-keyed. Tier-1 if ChemTreat sells PFAS treatment chemistry — pending sales confirmation. PFOA/PFOS MCLs enforceable since 2024-04. | Not started |
 | 7 | Industrial Stormwater MSGP AIM events | Tier-2 | Niche — facilities forced into Additional Implementation Measures = mandatory stormwater treatment. | Not started |

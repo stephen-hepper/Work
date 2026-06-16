@@ -1,5 +1,13 @@
 # Sewer Overflow / Bypass Event Integration
 
+**Status: shipped 2026-06-16.** Plan retained as the post-ship
+reference for the integration's design choices, live-data calibration,
+and risk decisions. Day-to-day: this is the integration that adds
+daily-cadence active-compliance signal for POTW leads. `EXTERNAL_DATA_
+STATUS.md` row 4 carries the canonical status; `TODO.md` "External
+data integrations" carries the rollup. The 2026-06-16 nationwide run
+results are summarized at the bottom of this doc under "Live results."
+
 Implementation plan for the Tier-1 #4 add from
 `EXTERNAL_DATA_STATUS.md` — sewer-overflow and bypass events from EPA's
 NPDES eRule Phase 2 feed. This is the **only daily-cadence** signal in
@@ -532,3 +540,66 @@ for name in zf.namelist():
 
 If column names have shifted from what's pinned in this doc, update
 both this doc and the streamer constants before any code changes.
+
+---
+
+## Live results — 2026-06-16 nationwide run (post-ship)
+
+First nationwide run with the integration enabled. Cache hits on all
+weekly feeds; `sewer_overflow.zip` refreshed (1-day cache window). API
+fine-comb 429-throttled by EPA as documented in `DEPLOYMENT.md`; per-
+row backoff (6h → 24h → 7d) handles the retry queue on the daily
+catch-up cron.
+
+**Inventory shape after POTW NAICS widening:**
+
+- 48,640 lead rows kept this run (34,917 CWA + 13,723 SDWA)
+- 9,094 net new facilities relative to the prior snapshot (~8.5K POTWs
+  entering the inventory for the first time)
+- 8,760 facilities with NAICS prefix `22132` now in the DB
+
+**Sewer-overflow signal coverage (CWA-only):**
+
+| Signal | Leads |
+|---|---|
+| Active sewer-overflow event in last 365d | 67 |
+| ↳ with SSO in types | 56 |
+| ↳ with dry-weather overflow | 52 (78% of overflow-flagged — strong concentration validates the dry-weather tier) |
+| `has_combined_sewer_system=1` (eRule OR CSO inventory) | 164 |
+| `collection_system_population > 0` (eRule enrollment) | 620 |
+| Sewer-overflow event rows persisted | 1,857 in the `violations` table |
+
+**Score distribution:**
+
+| Threshold | Leads |
+|---|---|
+| ≥ 50 (drill-down threshold) | 16,837 |
+| ≥ 100 | 2,996 |
+| ≥ 150 | 306 |
+| ≥ 200 | 0 |
+| Top score | 187 |
+
+The top score (187) did not push past the pre-CSO/SSO ceiling, but
+the lead holding it changed from a chemical-industrial facility to a
+brand-new POTW (NASHUA WWTP, NH — 7 sewer-overflow events totaling
+5.19M gallons of SSO).
+
+**Top 5 sewer-overflow leads** (none of these would have been visible
+on `main` before this branch):
+
+| # | Facility | State | Score | Events | Volume | Type |
+|---|---|---|---|---|---|---|
+| 1 | NASHUA WWTP | NH | 187 | 7 | 5.19M gal | SSO |
+| 2 | Pearson WPCP | GA | 169 | 6 | 0 gal | SSO |
+| 3 | PRASA Patillas STP | PR | 163 | 10 | 57K gal | SSO |
+| 4 | Morovis STP | PR | 148 | 7 | 315K gal | BYP \| SSO |
+| 5 | Corozal STP | PR | 147 | 12 | 265K gal | BYP \| SSO |
+
+**Follow-ups visible from this run:**
+
+- The score-tier re-baseline (TODO.md "Re-tier viewer color
+  thresholds") is now overdue against the post-CSO/SSO distribution.
+- The eRule rollout is still concentrated in IL, GA, PR, AZ, RI, SD,
+  NH, MS, NE, DC, NN, AK, KY, WA, VI (15 states/territories). Hit
+  rates will climb quarterly as more states onboard. Worth re-pulling
+  these numbers every few months.

@@ -287,7 +287,7 @@ Two rule families. Facility rules run on every lead (cheap, summary
 fields from `get_qid`). Event rules run after the high-score drill-down
 and inspect the actual violation events.
 
-**Facility rules** (`RULES`) — 11 total, grouped by signal class.
+**Facility rules** (`RULES`) — 14 total, grouped by signal class.
 Every numeric weight + tier threshold lives in `scoring.WEIGHTS`
 (externalized 2026-06-08; was inline literals before). Weight tuning
 is a one-line edit; no rule-body changes needed.
@@ -315,10 +315,35 @@ clarification for full framing:
 *Active-compliance signals* — fire on actual exceedances in the
 loaded fiscal-year DMR archive:
 - Recent DMR exceedance: tiered 5/8/10/12/15 by severity
-  (50%/100%/200%/1000% thresholds; `npdes_dmrs_fy<YEAR>.zip`)
+  (50%/100%/200%/1000% thresholds; `npdes_dmrs_fy<YEAR>.zip`).
+  **Sentinel display:** `EXCEEDENCE_PCT` ≥ 99,999 is the
+  bulk_loader display-clamp for EPA's INT32_MAX-encoded
+  "infinite over zero" values (limit-of-zero rows like chlorine
+  residual at no-detect permits, AND pass/fail biological assays
+  like Whole Effluent Toxicity tests). The rule emits a parameter-
+  aware "pass/fail or limit-of-zero parameter failure" reason
+  instead of the misleading "99999% over limit" — tier weight
+  unchanged at +15 since the underlying signal IS severe.
 - Exceeds permitted, treatable parameter (composite): 15 — the
   strongest single signal in the system, fires when the facility
   is permitted on AND currently exceeding the same treatable class
+
+*Active-compliance signals — sewer / POTW* (added 2026-06-16,
+Tier-1 #4 in EXTERNAL_DATA_STATUS.md):
+- Recent sewer overflow: tiered 5/8/12/15 on (event type × wet/dry
+  × volume). SEVERE = dry-weather SSO ≥100K gal OR any event ≥1M;
+  HIGH = any SSO OR dry-weather ≥100K; MODERATE = ≥10K OR any
+  dry-weather; MINOR = any event in 365d window. Sparse-volume
+  fall-through kept on purpose — EPA leaves the volume cell blank
+  ~30% of the time and silently zeroing those rows would mask
+  real signal.
+- Combined sewer system: flat +5 when `has_combined_sewer_system=1`
+  (eRule data OR National CSO Inventory — OR-merged). Stacks with
+  the event rule by design — CSS POTWs overflow more in wet weather
+  and we want both signals visible.
+- Collection-system population: tiered 4/7/10 at ≥3K / ≥10K / ≥50K
+  served, mirroring the SDWA tier thresholds exactly so equivalent-
+  size POTW and PWS score identically. Pinned by a test.
 
 *SDWA revenue-proxy signal* (added 2026-06-08, TODO E):
 - Population served: tiered 4/7/10 at ≥3K / ≥10K / ≥50K served
