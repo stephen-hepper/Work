@@ -57,8 +57,8 @@ penalty") — there is no ML black box.
 
 | Acronym | Stands for | What it means here |
 |---|---|---|
-| **CSO** | Combined Sewer Overflow | A sewer system that combines stormwater and sanitary; overflow events are queued for integration (Tier-1 #4), with the daily refresh cadence that would close our 30–90d lag. |
-| **SSO** | Sanitary Sewer Overflow | Same family as CSO, sanitary-only. |
+| **CSO** | Combined Sewer Overflow | A sewer system that combines stormwater and sanitary; overflow events feed the `tag_recent_sewer_overflow` / `tag_combined_sewer_system` chips. Shipped 2026-06-16 (Tier-1 #4) on a daily refresh cadence — the only sub-30d lag signal in the project. |
+| **SSO** | Sanitary Sewer Overflow | Same family as CSO, sanitary-only. Tagged separately as `tag_recent_sso` because it almost always indicates treatment-process failure (raw sewage where it shouldn't be). |
 | **TRI** | Toxics Release Inventory | EPA's annual per-facility per-chemical pounds-released report. Queued (Tier-1 #5) for the chemical-specific surface-water release dimension. |
 | **UCMR5** | Unregulated Contaminant Monitoring Rule, round 5 | The current round of EPA's mandate that PWSes test for emerging contaminants. UCMR5 is the PFAS-monitoring round. Queued (Tier-2 #6) pending sales confirmation that ChemTreat sells PFAS chemistry. |
 | **PFAS** | Per- and Polyfluoroalkyl Substances | "Forever chemicals." UCMR5's headline target. |
@@ -211,10 +211,13 @@ Then open `chemtreat_water_leads_viewer/index.html` in any browser
 (Chrome, Safari, Firefox — no internet required).
 
 1. Click **Upload files** at the top right.
-2. Select **all three** files at once:
-   - `all_leads.csv` (from `./materialized/run_latest/`)
-   - `violation_events.csv` (from `./materialized/run_latest/`)
-   - `run_health.json` (from the original `out/<run-folder>/`)
+2. Select **all three** files at once, all from `./materialized/run_latest/`:
+   - `all_leads.csv`
+   - `violation_events.csv`
+   - `run_health.json` (mirrored out of `runs.run_health_json` by
+     `dump_run` since 2026-06-16 — same folder as the CSVs. Runs from
+     before that date won't have it in the materialized folder; for
+     those, grab the JSON from the original `out/<run-folder>/`.)
    On Mac, cmd-click each to select multiple in the file picker.
 3. The viewer auto-detects each file by its columns/schema. Pick them
    in any order.
