@@ -173,21 +173,31 @@ dataset.
 In addition to the score, every row gets two view-builders worth of
 output for sales-side filtering:
 
-- **Tags** (`scoring.compute_tags`): twelve booleans organized into three classes —
-  - *Event-driven (5):* `tag_active_snc`, `tag_treatment_technique`,
+- **Tags** (`scoring.compute_tags`): sixteen booleans organized into four classes plus a composite —
+  - *Event-driven (5+1 guardrail):* `tag_active_snc`, `tag_treatment_technique`,
     `tag_mcl_violation`, `tag_lead_copper`, `tag_major_facility`,
     plus the do-not-call guardrail `tag_only_resolved_events`.
   - *Pre-violation (3):* `tag_treatable_permit`,
     `tag_discharges_to_impaired`, `tag_impairment_parameter_match` —
     populated from `npdes_limits.zip` + `npdes_attains_downloads.zip`.
     Bulk-only.
-  - *Active-compliance (2):* `tag_recent_exceedance`,
+  - *Active-compliance — DMR (2):* `tag_recent_exceedance`,
     `tag_exceeds_treatable_parameter` — populated from
     `npdes_dmrs_fy<YEAR>.zip`. Bulk-only. The composite is the
     strongest single signal in the system.
+  - *Active-compliance — Sewer (3) + CSS (1):* `tag_recent_sewer_overflow`,
+    `tag_recent_sso`, `tag_dry_weather_overflow`, `tag_combined_sewer_system` —
+    populated from the eRule Phase 2 sewer-overflow events feed +
+    the National CSO Inventory. Bulk-only, CWA/POTW-only. SSO + dry-
+    weather signatures are the strongest pair in this class
+    (treatment-process failure indicators). The CSS tag is
+    intentionally NOT in the composite below because it's common
+    enough (~hundreds of permits) to inflate the "pare 7K rows to
+    50" purpose — earns its keep as a standalone filter chip.
   - *Composite (1):* `tag_chemtreat_high_relevance` — OR-includes
-    every positive signal above, AND-excludes
-    `tag_only_resolved_events` (the do-not-call guardrail).
+    every positive signal above EXCEPT `tag_combined_sewer_system`,
+    AND-excludes `tag_only_resolved_events` (the do-not-call
+    guardrail).
   Sales filters in Excel on these to pare 7,000 rows into the 50
   they want without parsing reason strings.
 - **`outreach_posture`** (`scoring.compute_outreach_posture`): one word

@@ -52,7 +52,7 @@ import requests
 
 from . import _health, scoring, snapshot
 from .pipeline import (
-    TARGET_NAICS, LAG_BANNER, SDWA_LAG_NOTE, CWA_LAG_NOTE,
+    TARGET_NAICS, LAG_BANNER, SDWA_LAG_NOTE, CWA_LAG_NOTE, SEWER_LAG_NOTE,
     EVENT_DRILLDOWN_MIN_SCORE, LOOKBACK_DAYS,
     _drill_cwa, _drill_sdwa, _write_csv, _write_lag_notice, _run_output_dir,
 )
@@ -85,6 +85,18 @@ BULK_URLS = {
     # year-rollover triggers a redownload rather than re-using stale
     # data.
     "dmr_fy2026":    "https://echo.epa.gov/files/echodownloads/npdes_dmrs_fy2026.zip",
+    # Sewer Overflow / Bypass events — ~1 MB compressed, DAILY refresh
+    # under the NPDES eRule Phase 2 (started 2025-03). Carries the
+    # events + types + collection_system_permits CSVs we read; the
+    # other six CSVs in the archive are deferred (see CSO_SSO_PLAN.md).
+    # Cache window overridden to 1d in run_bulk so the daily cadence
+    # actually reaches the lead rows.
+    "sewer_overflow": "https://echo.epa.gov/files/echodownloads/current_sewer_overflow_and_collection_systems_tables.zip",
+    # National CSO Inventory — ~300 KB compressed, weekly. Supplements
+    # the events zip's collection_system_permits.csv with the ~649
+    # CSO-system permits whose state hasn't yet onboarded the eRule
+    # collection-system reporting.
+    "cso_inventory":  "https://echo.epa.gov/files/echodownloads/ALL_CSO_downloads.zip",
 }
 
 CACHE_MAX_AGE_DAYS = 7   # ECHO refreshes weekly; cache for that long
@@ -92,25 +104,29 @@ CACHE_MAX_AGE_DAYS = 7   # ECHO refreshes weekly; cache for that long
 
 # ----------------------------------------------------- download w/ cache
 
-def _download_cached(url: str, cache_dir: Path, name: str) -> Path:
+def _download_cached(url: str, cache_dir: Path, name: str,
+                     max_age_days: int = CACHE_MAX_AGE_DAYS) -> Path:
     """Download `url` to `cache_dir/name.zip`. Skip if cached file is fresh.
 
     Caching here is important: the ECHO Exporter is ~250 MB. You don't want
-    to pull it on every run. EPA refreshes weekly, so a 7-day cache window
-    matches their update cadence.
+    to pull it on every run. Most EPA feeds refresh weekly so the
+    default `CACHE_MAX_AGE_DAYS=7` matches their cadence. The
+    sewer-overflow events feed is the exception (daily refresh under
+    the 2025 eRule Phase 2) — callers pass `max_age_days=1` for that
+    one so the cache doesn't burn 6 of every 7 daily updates.
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
     target = cache_dir / f"{name}.zip"
 
     if target.exists():
         age = datetime.utcnow() - datetime.utcfromtimestamp(target.stat().st_mtime)
-        if age < timedelta(days=CACHE_MAX_AGE_DAYS):
+        if age < timedelta(days=max_age_days):
             log.info("Using cached %s (%.1f days old, %.1f MB)",
                      name, age.total_seconds() / 86400,
                      target.stat().st_size / 1e6)
             return target
         log.info("Cached %s is %.1f days old (>%d); re-downloading",
-                 name, age.total_seconds() / 86400, CACHE_MAX_AGE_DAYS)
+                 name, age.total_seconds() / 86400, max_age_days)
 
     log.info("Downloading %s from %s …", name, url)
     # Use `requests` (which trusts certifi's CA bundle) rather than
@@ -1080,6 +1096,412 @@ def stream_dmr_exceedances(
     return out, events
 
 
+# ----------------------------------------------------- sewer overflow events
+#
+# current_sewer_overflow_and_collection_systems_tables.zip contains nine
+# CSVs (eight data + one column-metadata catalog) plus an ERD PDF. We
+# read three of them: the events backbone, the one-to-many types lookup,
+# and the collection-system permit enrollment (which carries CSS percent
+# + population — feeds rule_collection_system_population alongside the
+# event-based scoring).
+#
+# Schema pinned against the 2026-06-15 refresh (915 KB compressed, 4,221
+# events, 608 distinct permits, 15 states/territories reporting). EPA's
+# column names are LOWERCASE_SNAKE — verify with the header-dump in
+# CSO_SSO_PLAN.md if anything looks off.
+#
+# Reporting only began 2025-03 under the NPDES eRule Phase 2 and rolls
+# on state-by-state, so empty results are expected for many states. The
+# streamer surfaces a `SEWER_LAG_NOTE` on every event row.
+
+_SEWER_EVENTS_CSV = "sewer_overflow_bypass_report_events.csv"
+_SEWER_TYPES_CSV = "sewer_overflow_bypass_types.csv"
+_SEWER_PERMITS_CSV = "collection_system_permits.csv"
+
+# Per-event datetime format. EPA writes naive timestamps like
+# "2025-09-09 20:30:00" — no timezone, treat as UTC-equivalent for the
+# window comparison (we're not doing anything timezone-sensitive).
+_SEWER_DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _parse_sewer_datetime(s: str) -> datetime | None:
+    """Parse EPA's sewer-event datetime. Returns None on blank /
+    unparseable so the window filter ignores those rows safely."""
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        return datetime.strptime(s, _SEWER_DATETIME_FMT)
+    except ValueError:
+        return None
+
+
+def _safe_volume_gallons(raw: str) -> float | None:
+    """Parse a volume-gallons cell into a float, or None for blank /
+    unparseable / zero.
+
+    EPA reports ~30% of events with no volume — leaves the cell blank
+    rather than zeroing it. Treat None and 0 the same (don't add to
+    the sum, don't influence the tier)."""
+    s = (raw or "").strip()
+    if not s:
+        return None
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    return v if v > 0 else None
+
+
+def stream_sewer_overflow_events(
+    zip_path: Path,
+    kept_npdes_permits: set[str],
+    permit_to_registry: dict[str, str] | None = None,
+    window_days: int = 365,
+    now: datetime | None = None,
+) -> tuple[dict[str, dict], list[dict]]:
+    """Build per-permit sewer-overflow signals AND per-event rows from
+    `current_sewer_overflow_and_collection_systems_tables.zip`.
+
+    Returns ``(signals_by_permit, events)`` where:
+
+      signals_by_permit = {
+        npdes_id: {
+          "recent_sewer_overflow_count": int,
+          "recent_sewer_overflow_volume_gal": float,
+          "most_recent_sewer_overflow_at": str,    # ISO datetime
+          "recent_sewer_overflow_types": str,      # "CSO | SSO"
+          "has_dry_weather_overflow": int,         # 0/1
+        }
+      }
+
+      events = [
+        {"violation_id", "registry_id", "permit_id", "npdes_id",
+         "program", "violation_category", "parameter",
+         "dmr_value", "dmr_unit", "period_begin", "period_end",
+         "violation_description", "status", "data_lag_note", ...},
+        ...
+      ]
+
+    Filter:
+      * `permit_identifier in kept_npdes_permits`. Same shape as
+        stream_dmr_exceedances — identical join key.
+      * Event start within `window_days` of `now` (default
+        `datetime.utcnow()`).
+
+    Streaming notes:
+      * Pre-loads the types CSV into `{event_key: sorted [type_codes]}`
+        before scanning events. The types table is one-to-many (a
+        single event can carry multiple type codes — e.g. SSO and BYP
+        for an overflow that occurred during a bypass).
+      * `sewer_overflow_bypass_event_key` is EPA's stable system-
+        generated PK; used verbatim as `violation_id`.
+      * Datetimes are EPA's `"YYYY-MM-DD HH:MM:SS"` (naive). Rows with
+        unparseable / blank start datetime are kept but excluded from
+        the window cutoff (defensive — we'd rather see them than drop).
+    """
+    if not kept_npdes_permits:
+        log.info("No CWA permits in scope; skipping sewer-overflow scan.")
+        return {}, []
+
+    permit_to_registry = permit_to_registry or {}
+    now = now or datetime.utcnow()
+    cutoff = now - timedelta(days=window_days)
+
+    with zipfile.ZipFile(zip_path) as zf:
+        names = {n.lower(): n for n in zf.namelist()}
+        events_name = names.get(_SEWER_EVENTS_CSV)
+        types_name = names.get(_SEWER_TYPES_CSV)
+        if events_name is None or types_name is None:
+            raise RuntimeError(
+                f"Missing {_SEWER_EVENTS_CSV} or {_SEWER_TYPES_CSV} inside "
+                f"{zip_path.name}; EPA may have renamed a file — check "
+                "https://echo.epa.gov/tools/data-downloads"
+            )
+
+        # ----- Pre-load event-key → [type_codes] from the types CSV -----
+        # The types table is small (~4K rows on a typical refresh, one
+        # row per (event, type)). Loading it whole is cheap; the join
+        # against the events scan stays in-memory and O(events).
+        types_by_event: dict[str, set[str]] = {}
+        with zf.open(types_name) as raw_fh:
+            text_fh = io.TextIOWrapper(raw_fh, encoding="utf-8",
+                                       errors="replace")
+            for row in csv.DictReader(text_fh):
+                ek = row.get("sewer_overflow_bypass_event_key")
+                code = (row.get("sewer_overflow_bypass_type_code") or "").strip().upper()
+                if ek and code:
+                    types_by_event.setdefault(ek, set()).add(code)
+        log.info("Sewer types: loaded %d event→types entries", len(types_by_event))
+
+        # ----- Scan events ---------------------------------------------
+        out: dict[str, dict] = {}
+        events: list[dict] = []
+        types_by_permit: dict[str, set[str]] = {}
+        rows_scanned = rows_kept = 0
+
+        with zf.open(events_name) as raw_fh:
+            text_fh = io.TextIOWrapper(raw_fh, encoding="utf-8",
+                                       errors="replace")
+            for row in csv.DictReader(text_fh):
+                rows_scanned += 1
+                permit = row.get("permit_identifier")
+                if not permit or permit not in kept_npdes_permits:
+                    continue
+                event_key = row.get("sewer_overflow_bypass_event_key")
+                if not event_key:
+                    # No PK — can't dedupe across refreshes. Skip rather
+                    # than synthesize; the upstream-data contract says
+                    # this should always be populated.
+                    continue
+
+                start_raw = row.get("sewer_overflow_bypass_start_datetime") or ""
+                start_dt = _parse_sewer_datetime(start_raw)
+                # Window filter: skip events with a parseable start older
+                # than the cutoff. Unparseable / blank starts are KEPT —
+                # defensive, since the file's "current" snapshot already
+                # implies recency.
+                if start_dt is not None and start_dt < cutoff:
+                    continue
+
+                rows_kept += 1
+                end_raw = row.get("sewer_overflow_bypass_end_datetime") or ""
+                volume = _safe_volume_gallons(
+                    row.get("sewer_overflow_bypass_discharge_volume_gallons"))
+                wet = (row.get("wet_weather_occurance_indicator") or "").strip().upper()
+                structure = (row.get("sewer_overflow_structure_type_desc") or "").strip()
+                type_codes = types_by_event.get(event_key, set())
+
+                # ----- Per-permit rollup --------------------------------
+                sig = out.setdefault(permit, {
+                    "recent_sewer_overflow_count": 0,
+                    "recent_sewer_overflow_volume_gal": 0.0,
+                    "most_recent_sewer_overflow_at": "",
+                    "has_dry_weather_overflow": 0,
+                })
+                sig["recent_sewer_overflow_count"] += 1
+                if volume is not None:
+                    sig["recent_sewer_overflow_volume_gal"] += volume
+                if wet == "N":
+                    sig["has_dry_weather_overflow"] = 1
+                # most_recent_sewer_overflow_at: track the newest
+                # parseable start datetime. Falls back to start_raw
+                # only when we have nothing better — preserves the
+                # field for unparseable rows so they still surface.
+                if start_dt is not None:
+                    prev = sig["most_recent_sewer_overflow_at"]
+                    if not prev or start_raw > prev:
+                        sig["most_recent_sewer_overflow_at"] = start_raw
+                elif not sig["most_recent_sewer_overflow_at"]:
+                    sig["most_recent_sewer_overflow_at"] = start_raw
+
+                if type_codes:
+                    types_by_permit.setdefault(permit, set()).update(type_codes)
+
+                # ----- Per-event payload --------------------------------
+                # Map type code(s) to a single human-readable parameter
+                # for the violation_events.csv. Order of preference SSO
+                # > CSO > BYP matches the tier ordering — when an event
+                # carries multiple codes, the row reads as the most
+                # diagnostic.
+                if "SSO" in type_codes:
+                    parameter = "Sanitary Sewer Overflow"
+                elif "CSO" in type_codes:
+                    parameter = "Combined Sewer Overflow"
+                elif "BYP" in type_codes:
+                    parameter = "Bypass"
+                else:
+                    parameter = "Sewer Overflow"
+
+                # violation_description: structure + wet/dry tag so the
+                # viewer's event-detail row reads cleanly without the
+                # rep having to know what wet_weather_occurance_indicator
+                # means.
+                desc_parts = []
+                if structure:
+                    desc_parts.append(structure)
+                if wet == "N":
+                    desc_parts.append("dry-weather")
+                elif wet == "Y":
+                    desc_parts.append("wet-weather")
+                description = " — ".join(desc_parts) if desc_parts else ""
+
+                events.append({
+                    "violation_id": event_key,
+                    "registry_id": permit_to_registry.get(permit),
+                    "permit_id": permit,
+                    "npdes_id": permit,
+                    "program": "CWA",
+                    "violation_category": "Sewer Overflow / Bypass Event",
+                    "parameter": parameter,
+                    "dmr_value": (f"{volume:.0f}" if volume is not None else ""),
+                    "dmr_unit": "gallons" if volume is not None else "",
+                    "period_begin": start_raw,
+                    "period_end": end_raw,
+                    "violation_description": description,
+                    "status": "Unresolved",
+                    "data_lag_note": SEWER_LAG_NOTE,
+                })
+
+                if rows_scanned % 100_000 == 0:
+                    log.info("  Sewer overflow scanned %d rows, kept %d",
+                             rows_scanned, rows_kept)
+
+    # Finalize per-permit types text. Sorted for stable snapshot diffs
+    # (same convention as stream_attains_linkage's joins).
+    for permit, codes in types_by_permit.items():
+        out[permit]["recent_sewer_overflow_types"] = " | ".join(sorted(codes))
+
+    log.info("Sewer overflow events done: scanned %d rows, kept %d across "
+             "%d permits", rows_scanned, rows_kept, len(out))
+    return out, events
+
+
+def stream_collection_system_permits(
+    zip_path: Path,
+    kept_npdes_permits: set[str],
+) -> dict[str, dict]:
+    """Build per-permit collection-system signals from
+    `collection_system_permits.csv` inside the sewer-overflow events
+    zip. Static enrollment data — one row per (permit, collection-system
+    identifier).
+
+    Returns ``{npdes_id: {percent_collection_system_css: int,
+                          collection_system_population: int,
+                          has_combined_sewer_system: 0/1}}``.
+
+    Aggregation across multi-system permits (rare — ~30 of the 4,036
+    permits in the 2026-06-15 refresh have >1 system):
+      * `collection_system_population`: SUM across sub-systems. A POTW
+        whose collection network feeds 6 municipalities at 5K each is
+        a 30K-population account, not 5K — the rep cares about total
+        served.
+      * `percent_collection_system_css`: MAX across sub-systems. The
+        question the score asks is "does this permit operate ANY
+        combined sewer system?" — present in even one feeds the same
+        wet-weather-overflow risk that drives the +5 rule.
+      * `has_combined_sewer_system`: 1 if any sub-system has css_pct > 0.
+
+    Filter:
+      * `permit_identifier in kept_npdes_permits`. Same join key as
+        the events feed.
+    """
+    if not kept_npdes_permits:
+        log.info("No CWA permits in scope; skipping collection-system scan.")
+        return {}
+
+    out: dict[str, dict] = {}
+    rows_scanned = rows_matched = 0
+
+    with zipfile.ZipFile(zip_path) as zf:
+        names = {n.lower(): n for n in zf.namelist()}
+        target = names.get(_SEWER_PERMITS_CSV)
+        if target is None:
+            raise RuntimeError(
+                f"No {_SEWER_PERMITS_CSV} inside {zip_path.name}; EPA may "
+                "have renamed the file — check "
+                "https://echo.epa.gov/tools/data-downloads"
+            )
+        with zf.open(target) as raw_fh:
+            text_fh = io.TextIOWrapper(raw_fh, encoding="utf-8",
+                                       errors="replace")
+            for row in csv.DictReader(text_fh):
+                rows_scanned += 1
+                permit = row.get("permit_identifier")
+                if not permit or permit not in kept_npdes_permits:
+                    continue
+                rows_matched += 1
+                try:
+                    pop = int(float(row.get("collection_system_population") or 0))
+                except ValueError:
+                    pop = 0
+                try:
+                    css_pct = int(float(row.get("percent_collection_system_css") or 0))
+                except ValueError:
+                    css_pct = 0
+
+                sig = out.setdefault(permit, {
+                    "percent_collection_system_css": 0,
+                    "collection_system_population": 0,
+                    "has_combined_sewer_system": 0,
+                })
+                # SUM population (multi-system permits cover larger
+                # service areas; the score rule reads total served).
+                sig["collection_system_population"] += pop
+                # MAX css_pct (any one combined system flips the bit).
+                if css_pct > sig["percent_collection_system_css"]:
+                    sig["percent_collection_system_css"] = css_pct
+                if css_pct > 0:
+                    sig["has_combined_sewer_system"] = 1
+
+    log.info("Collection-system permits done: scanned %d rows, matched %d, "
+             "kept signal for %d permits",
+             rows_scanned, rows_matched, len(out))
+    return out
+
+
+def stream_cso_inventory(
+    zip_path: Path,
+    kept_npdes_permits: set[str],
+) -> dict[str, dict]:
+    """Build per-permit CSS signals from the National CSO Inventory
+    (`ALL_CSO_DOWNLOADS.csv`). Supplements
+    `stream_collection_system_permits` — covers ~649 CSO-system permits
+    in the 2026-06-15 refresh that the eRule-driven collection-system
+    data hasn't onboarded yet (older permits whose state hasn't started
+    reporting).
+
+    Returns ``{npdes_id: {has_combined_sewer_system: 1}}``.
+
+    File shape: one row per CSO outfall, many rows per permit. We only
+    need the existence of any matching row — every row in this file
+    documents a CSO outfall by definition, so presence == CSS POTW.
+
+    Filter:
+      * `NPDES_ID in kept_npdes_permits`. Note the column is uppercase
+        here (`NPDES_ID`) vs the eRule files' `permit_identifier` —
+        EPA's two feeds use different conventions. Both join to the
+        same NPDES permit-id space.
+    """
+    if not kept_npdes_permits:
+        log.info("No CWA permits in scope; skipping CSO inventory scan.")
+        return {}
+
+    out: dict[str, dict] = {}
+    rows_scanned = rows_matched = 0
+
+    with zipfile.ZipFile(zip_path) as zf:
+        target = next(
+            (n for n in zf.namelist()
+             if n.upper().endswith("ALL_CSO_DOWNLOADS.CSV")),
+            None,
+        )
+        if target is None:
+            raise RuntimeError(
+                f"No ALL_CSO_DOWNLOADS.csv inside {zip_path.name}; EPA may "
+                "have renamed the file — check "
+                "https://echo.epa.gov/tools/data-downloads"
+            )
+        with zf.open(target) as raw_fh:
+            text_fh = io.TextIOWrapper(raw_fh, encoding="utf-8",
+                                       errors="replace")
+            for row in csv.DictReader(text_fh):
+                rows_scanned += 1
+                permit = row.get("NPDES_ID")
+                if not permit or permit not in kept_npdes_permits:
+                    continue
+                rows_matched += 1
+                # Many rows per permit — set once, ignore subsequent
+                # matches. The signal is binary; we'd just be re-writing
+                # the same 1.
+                out.setdefault(permit, {"has_combined_sewer_system": 1})
+
+    log.info("CSO inventory done: scanned %d rows, matched %d outfalls, "
+             "kept signal for %d permits",
+             rows_scanned, rows_matched, len(out))
+    return out
+
+
 # ----------------------------------------------------- main pipeline
 
 def _load_prior_scores(db_path: Path) -> dict[tuple[str, str], int]:
@@ -1526,12 +1948,97 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
         except Exception as e:
             log.warning("DMR archive load failed: %s", e)
 
+        # Sewer Overflow / Bypass — daily-cadence active-compliance
+        # signal. Cache window pinned to 1 day so the daily refresh
+        # actually reaches the lead rows (default would coalesce 7 of
+        # them). Signals applied immediately so the new rules
+        # (rule_recent_sewer_overflow, rule_combined_sewer_system,
+        # rule_collection_system_population) contribute to drill-down
+        # candidate selection. Events held alongside dmr_events for
+        # later append — same dedup convention as DMR-vs-NPDES_SE.
+        sewer_events: list[dict] = []
+        try:
+            sewer_zip = _download_cached(BULK_URLS["sewer_overflow"],
+                                         cache_dir, "sewer_overflow",
+                                         max_age_days=1)
+            sewer_signals, sewer_events = stream_sewer_overflow_events(
+                sewer_zip, kept_npdes_permits, permit_to_registry)
+            sewer_hits = 0
+            for lead in leads:
+                if lead["program"] != "CWA":
+                    continue
+                sig = sewer_signals.get(lead["permit_id"])
+                if sig:
+                    lead.update(sig)
+                    lead["__raw"].update(sig)
+                    sewer_hits += 1
+            log.info("Applied sewer-overflow signals to %d CWA leads "
+                     "(%d total event rows queued for persistence)",
+                     sewer_hits, len(sewer_events))
+        except Exception as e:
+            log.warning("Sewer overflow load failed: %s", e)
+
+        # Collection-system permits — static enrollment data, lives in
+        # the sewer_overflow zip we already downloaded above. Cheap to
+        # scan even on its own. Feeds rule_combined_sewer_system (+5)
+        # and rule_collection_system_population (POTW revenue proxy).
+        try:
+            # Re-resolve the zip path; if the earlier download failed,
+            # this block will fail too and the warning chain will land
+            # twice in the log — acceptable (the second message
+            # explains exactly which feed died).
+            sewer_zip = _download_cached(BULK_URLS["sewer_overflow"],
+                                         cache_dir, "sewer_overflow",
+                                         max_age_days=1)
+            cs_signals = stream_collection_system_permits(
+                sewer_zip, kept_npdes_permits)
+            cs_hits = 0
+            for lead in leads:
+                if lead["program"] != "CWA":
+                    continue
+                sig = cs_signals.get(lead["permit_id"])
+                if sig:
+                    lead.update(sig)
+                    lead["__raw"].update(sig)
+                    cs_hits += 1
+            log.info("Applied collection-system permit signals to %d CWA leads",
+                     cs_hits)
+        except Exception as e:
+            log.warning("Collection-system permits load failed: %s", e)
+
+        # National CSO Inventory — covers the ~649 CSO-system permits
+        # the eRule data hasn't onboarded yet. ONLY emits
+        # has_combined_sewer_system=1; sets the flag on permits where
+        # collection_system_permits.csv didn't (either absent or
+        # css_pct=0). The OR semantics are intentional: a permit
+        # listed in the federal CSO inventory has CSO outfalls by
+        # definition.
+        try:
+            cso_zip = _download_cached(BULK_URLS["cso_inventory"],
+                                       cache_dir, "cso_inventory")
+            cso_signals = stream_cso_inventory(
+                cso_zip, kept_npdes_permits)
+            cso_hits = 0
+            for lead in leads:
+                if lead["program"] != "CWA":
+                    continue
+                sig = cso_signals.get(lead["permit_id"])
+                if sig:
+                    lead.update(sig)
+                    lead["__raw"].update(sig)
+                    cso_hits += 1
+            log.info("Applied CSO inventory signals to %d CWA leads", cso_hits)
+        except Exception as e:
+            log.warning("CSO inventory load failed: %s", e)
+
         # Re-score with the new facility-level signals so the new rules
         # (rule_treatable_permit_parameter, rule_discharges_to_impaired,
-        # rule_recent_dmr_exceedance, rule_exceeds_treatable_parameter)
-        # contribute BEFORE drill-down candidate selection. Pass an
-        # empty events list — events haven't been loaded yet, and
-        # _augment_leads's events=[] path skips EVENT_RULES cleanly.
+        # rule_recent_dmr_exceedance, rule_exceeds_treatable_parameter,
+        # rule_recent_sewer_overflow, rule_combined_sewer_system,
+        # rule_collection_system_population) contribute BEFORE drill-down
+        # candidate selection. Pass an empty events list — events
+        # haven't been loaded yet, and _augment_leads's events=[] path
+        # skips EVENT_RULES cleanly.
         _augment_leads(leads, events=[])
         leads.sort(key=lambda r: r["lead_score"], reverse=True)
         log.info("Pre-violation augmentation complete: %d leads now scoring >= %d",
@@ -1564,6 +2071,14 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
         # ~82% of exceedance rows (verified in the live FY2026 file);
         # the rest are DMR-only. Either way, DMR-last wins on conflict.
         events.extend(dmr_events)
+        # Sewer-overflow events ride a disjoint violation_id space
+        # (EPA's sewer_overflow_bypass_event_key is unique to this
+        # feed), so order doesn't affect upsert behavior — appended
+        # alongside DMR for symmetry. snapshot.diff_and_upsert_
+        # violations uses the npdes_id fallback when registry_id is
+        # blank, so the streamer's permit_to_registry-backfill is
+        # belt-and-suspenders.
+        events.extend(sewer_events)
 
         # 4a. Phase-2 augmentation: re-score with events, set posture, set tags.
         _augment_leads(leads, events)
@@ -1670,7 +2185,7 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
     today = datetime.utcnow().strftime("%Y%m%d")
     _write_csv(run_dir / f"newly_snc_{today}.csv", fac_diff["newly_snc"])
 
-    health_path = _health.write_run_health(
+    health_path, health_json = _health.write_run_health(
         run_dir,
         command="bulk_loader",
         states=states,
@@ -1685,7 +2200,14 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
         event_drilldown_min_score=EVENT_DRILLDOWN_MIN_SCORE,
         secondary_drilldown_min_score=SECONDARY_DRILLDOWN_MIN_SCORE,
     )
-    log.info("Wrote run health to %s", health_path)
+    # Mirror into the DB so dump_run can materialize it alongside the
+    # CSVs (single uploadable folder for the viewer). Separate
+    # connection to avoid holding the persistence block open longer
+    # than needed.
+    with snapshot.open_db(db_path) as conn:
+        snapshot.set_run_health(conn, run_id, health_json)
+    log.info("Wrote run health to %s (mirrored into runs.run_health_json)",
+             health_path)
 
     log.info("Bulk run complete: %d leads, %d events, %d new facilities, "
              "%d newly SNC, %d new violations.",
@@ -1693,8 +2215,9 @@ def _run_bulk_inner(out_dir: Path, db_path: Path, cache_dir: Path,
              len(fac_diff["new"]), len(fac_diff["newly_snc"]),
              len(viol_diff["new"]))
     log.info("Run %d outputs in %s (run_health.json, newly_snc_*.csv). "
-             "To materialize all_leads.csv + violation_events.csv for the "
-             "viewer, run:  python -m chemtreat_water_leads.dump_run "
+             "To materialize the viewer-uploadable folder (all_leads.csv, "
+             "violation_events.csv, run_health.json), run:  "
+             "python -m chemtreat_water_leads.dump_run "
              "--db %s --run-id %d --out ./materialized/run_%d",
              run_id, run_dir, db_path, run_id, run_id)
     print(LAG_BANNER)

@@ -30,7 +30,7 @@ Computed for **every** lead, from the summary columns EPA returns in the
 facility listing (`get_qid` for the API path, ECHO Exporter columns for
 bulk). No per-violation detail; just counts and flags.
 
-`scoring.RULES` (11 rules):
+`scoring.RULES` (14 rules):
 
 | Rule | Points | Fires on |
 |---|---|---|
@@ -44,6 +44,9 @@ bulk). No per-violation detail; just counts and flags.
 | `rule_discharges_to_impaired` | 10 or 15 | `discharges_to_impaired=1` (any AU impaired) → +10; `matching_impaired_parameters` populated (effluent matches impairment cause) → +15 instead (no double-counting). Bulk-only, from `npdes_attains_downloads.zip`. |
 | `rule_recent_dmr_exceedance` | 5/8/10/12/15 | Tiered by `top_exceedance_pct` at thresholds 50 / 100 / 200 / 1000%. Bulk-only, from `npdes_dmrs_fy<YEAR>.zip`. |
 | `rule_exceeds_treatable_parameter` | 15 | Composite: any class in `exceeded_treatable_parameters_text` is also in `permit_has_*`. The strongest single signal in the system — "permit covers it AND they're exceeding it." Bulk-only. |
+| `rule_recent_sewer_overflow` | 5 / 8 / 12 / 15 | Tiered on (event type × wet/dry × volume) over the last 365 days. SEVERE = dry-weather SSO ≥ 100K gal OR any event ≥ 1M gal; HIGH = any SSO or dry-weather ≥ 100K gal; MODERATE = ≥ 10K gal or any dry-weather event; MINOR = any event in window. Daily-cadence active-compliance signal from the eRule Phase 2 feed. Bulk-only, CWA/POTW-only. |
+| `rule_combined_sewer_system` | 5 | Flat bump when `has_combined_sewer_system=1` (eRule data OR National CSO Inventory). Long-term POTW lead identity — CSS POTWs overflow more in wet weather, so this stacks with `rule_recent_sewer_overflow` by design. Bulk-only. |
+| `rule_collection_system_population` | 4 / 7 / 10 | Tiered by `collection_system_population` at 3K / 10K / 50K. CWA-side revenue proxy for POTWs — mirrors `rule_population_served` thresholds. Bulk-only. |
 | `rule_population_served` | 4 / 7 / 10 | Tiered by `PopulationServedCount` at 3K / 10K / 50K. Revenue proxy for SDWA — a major utility is a much bigger account than a 200-person mobile-home park. **API-only** (ECHO Exporter doesn't carry PWS metadata; the rule returns None on bulk SDWA rows). |
 
 All weights and tier thresholds live in the `WEIGHTS` dict at the top
@@ -133,7 +136,9 @@ python -m chemtreat_water_leads.pipeline \
 
 Internally, both commands re-call `scoring.score_facility(raw, events)`
 on each drilled lead. Pass 2 also recomputes the `outreach_posture`
-string and the seven `tag_*` boolean columns; see
+string and the sixteen `tag_*` boolean columns (event-driven, pre-
+violation, active-compliance DMR, active-compliance sewer/POTW, plus
+the `tag_chemtreat_high_relevance` composite); see
 `scoring.compute_outreach_posture` and `scoring.compute_tags`.
 
 ---

@@ -86,6 +86,41 @@ WEIGHTS: dict[str, int] = {
     "dmr_threshold_moderate":        100,
     "dmr_threshold_noticeable":       50,
     "exceeds_treatable_composite":    15,
+    # ---- sewer overflow / bypass events (facility rule, bulk-only) ---
+    # Tier ladder bakes in two findings from the live data:
+    #   1. SSO ≈ raw sewage where it shouldn't be → treatment failure
+    #      by definition. CSO is often permit-designed wet-weather
+    #      behavior at older POTWs. So SSO outranks CSO at the same
+    #      volume.
+    #   2. 70% of 2026-06-15-refresh events are dry-weather. Dry-
+    #      weather overflow at any volume is more diagnostic than a
+    #      1M-gal wet-weather CSO.
+    # Volume thresholds match the p99/p90/p50 of the live distribution
+    # (max ~2.8B gal, p99 ~15.6M, p90 ~526K, p50 ~2.4K). EPA's volume
+    # field is sparse (~30% blank) so the "minor" tier still scores
+    # +5 when count > 0 but every volume cell was empty.
+    "sewer_overflow_severe":          15,
+    "sewer_overflow_high":            12,
+    "sewer_overflow_moderate":         8,
+    "sewer_overflow_minor":            5,
+    "sewer_overflow_volume_severe":      1_000_000,   # ≥ p99 single-event
+    "sewer_overflow_volume_high":          100_000,   # ≈ top decile
+    "sewer_overflow_volume_moderate":       10_000,   # ≈ top half
+    # Flat bump for permits with a combined sewer system (eRule or CSO-
+    # inventory data). Stacks with the event-based tier — CSS POTWs
+    # overflow more often during wet weather; both rules firing is the
+    # expected pattern.
+    "combined_sewer_system":           5,
+    # CWA-side revenue proxy for POTWs. Mirrors rule_population_served
+    # (SDWA-only) using collection_system_population from the eRule
+    # collection-system rollup. Thresholds match the SDWA tiers so
+    # equivalent-size systems score the same regardless of program.
+    "collection_system_pop_large":    10,    # ≥ 50K served
+    "collection_system_pop_medium":    7,    # ≥ 10K
+    "collection_system_pop_small":     4,    # ≥  3K
+    "collection_system_pop_large_threshold":   50_000,
+    "collection_system_pop_medium_threshold":  10_000,
+    "collection_system_pop_small_threshold":    3_000,
     # ---- SDWA revenue proxy (facility rule, API-only) ----------------
     # Population served is a direct revenue proxy: a 50K-person utility
     # is a far bigger account than a 200-person mobile-home park. The
@@ -298,12 +333,34 @@ def rule_recent_dmr_exceedance(f: dict):
       *   high: 200–1000% over — severe; enforcement likely already underway
       *   severe: >1000% over — egregious; treatment system probably failing
 
+    The severe tier has a special reason string for the sentinel value:
+    `bulk_loader` stores 99999.0 for either `limit=0` rows (e.g. chlorine
+    residual at a permit that bans any detectable residual) OR for pass/
+    fail biological assays like Whole Effluent Toxicity tests where EPA's
+    EXCEEDENCE_PCT computation has no real denominator. Rendering
+    "99999% over limit" misreads as a chemical-concentration overage; the
+    actual signal is a treatment-process failure on a non-continuous
+    parameter. Tier still fires (+15) because the underlying signal IS
+    severe — only the reason string changes.
+
     All weights and thresholds live in WEIGHTS. Bulk-only; pipeline.run
     (API path) doesn't pull DMR archives today."""
     pct = _safe_float(f.get("top_exceedance_pct"))
     if pct <= 0:
         return None
     if pct >= WEIGHTS["dmr_threshold_severe"]:
+        # 99999.0 is bulk_loader._DISPLAY_EXCEEDANCE_CAP — the sentinel
+        # for EPA's INT32_MAX-encoded "infinite over zero" values.
+        # Hardcoded with comment rather than imported because crossing
+        # the scoring/streamer boundary for one threshold isn't worth
+        # the coupling; a regression would surface in
+        # test_dmr_exceedance_scoring immediately.
+        if pct >= 99999.0:
+            param = (f.get("top_exceeded_parameter") or "").strip()
+            qualifier = f" ({param})" if param else ""
+            return (WEIGHTS["dmr_exceedance_severe"],
+                    "DMR pass/fail or limit-of-zero parameter failure"
+                    f"{qualifier} (severe)")
         return (WEIGHTS["dmr_exceedance_severe"],
                 f"DMR exceedance {pct:.0f}% over limit (severe)")
     if pct >= WEIGHTS["dmr_threshold_high"]:
@@ -347,6 +404,95 @@ def rule_exceeds_treatable_parameter(f: dict):
     return (WEIGHTS["exceeds_treatable_composite"],
             "Exceeding permitted, ChemTreat-treatable parameter: "
             + ", ".join(matches))
+
+
+def rule_recent_sewer_overflow(f: dict):
+    """Tier on (type, wet/dry, volume) for sewer overflow / bypass events
+    in the last `sewer_overflow_window_days` (streamer-enforced).
+
+    The ladder is deliberately fall-through: a row with only a count
+    (no volume, no type-code) still scores the minor tier. EPA's volume
+    field is ~30% blank in the live data, and the type-code join is
+    sometimes lossy — silently zeroing those rows would mask real
+    signal. Reads `recent_sewer_overflow_count`,
+    `recent_sewer_overflow_volume_gal`, `recent_sewer_overflow_types`,
+    `has_dry_weather_overflow` from `bulk_loader.stream_sewer_overflow_
+    events`. Bulk-only; pipeline.run (API path) doesn't pull this feed.
+    """
+    count = _safe_int(f.get("recent_sewer_overflow_count"))
+    if count <= 0:
+        return None
+    volume = _safe_float(f.get("recent_sewer_overflow_volume_gal"))
+    types = str(f.get("recent_sewer_overflow_types") or "").upper()
+    dry = bool(f.get("has_dry_weather_overflow"))
+    has_sso = "SSO" in types
+
+    # SEVERE: dry-weather SSO with meaningful volume OR any event with
+    # >=p99 volume. Both signatures mean "treatment process is failing
+    # at scale" — the ChemTreat sales conversation writes itself.
+    if (dry and has_sso
+            and volume >= WEIGHTS["sewer_overflow_volume_high"]) \
+       or volume >= WEIGHTS["sewer_overflow_volume_severe"]:
+        return (WEIGHTS["sewer_overflow_severe"],
+                f"{count} sewer overflow event(s); worst signature: dry-weather "
+                "SSO ≥100K gal" if dry and has_sso
+                else f"{count} sewer overflow event(s); volume {volume:,.0f} gal")
+    # HIGH: any SSO (regardless of weather/volume — raw sewage is raw
+    # sewage) OR a dry-weather event ≥100K gal.
+    if has_sso:
+        return (WEIGHTS["sewer_overflow_high"],
+                f"{count} sewer overflow event(s) including SSO")
+    if dry and volume >= WEIGHTS["sewer_overflow_volume_high"]:
+        return (WEIGHTS["sewer_overflow_high"],
+                f"{count} dry-weather sewer overflow event(s); "
+                f"volume {volume:,.0f} gal")
+    # MODERATE: enough volume to read as more than a hiccup, OR any
+    # dry-weather event (even with unknown volume).
+    if volume >= WEIGHTS["sewer_overflow_volume_moderate"] or dry:
+        return (WEIGHTS["sewer_overflow_moderate"],
+                f"{count} sewer overflow event(s); "
+                + (f"volume {volume:,.0f} gal" if volume > 0
+                   else "dry-weather"))
+    # MINOR: at least one event in window. Catches wet-weather CSO/BYP
+    # with unreported volume — non-zero signal, low confidence.
+    return (WEIGHTS["sewer_overflow_minor"],
+            f"{count} sewer overflow event(s) in last 365d")
+
+
+def rule_combined_sewer_system(f: dict):
+    """Flat bump for permits operating a combined sewer system.
+
+    Long-term POTW lead identity — independent of whether events have
+    been reported. Stacks intentionally with `rule_recent_sewer_overflow`
+    because CSS POTWs overflow more often during wet weather; both rules
+    firing is the expected pattern, not double-counting.
+
+    Reads `has_combined_sewer_system` set by either
+    `stream_collection_system_permits` (eRule data) or
+    `stream_cso_inventory` (older CSO-system permits). Bulk-only."""
+    if not f.get("has_combined_sewer_system"):
+        return None
+    return WEIGHTS["combined_sewer_system"], "Operates a combined sewer system"
+
+
+def rule_collection_system_population(f: dict):
+    """CWA-side revenue proxy for POTW permits. Tiered by
+    `collection_system_population` from the eRule collection-system
+    rollup — direct analog to SDWA's `rule_population_served`.
+
+    A 50K-person POTW is a meaningfully larger ChemTreat account than
+    a 500-person municipal lagoon, independent of compliance status.
+    Bulk-only; pipeline.run (API path) doesn't pull this feed, so CWA
+    leads from the API path cleanly return None here."""
+    n = _safe_int(f.get("collection_system_population"))
+    if n >= WEIGHTS["collection_system_pop_large_threshold"]:
+        return (WEIGHTS["collection_system_pop_large"],
+                f"Serves {n:,} people (major collection system)")
+    if n >= WEIGHTS["collection_system_pop_medium_threshold"]:
+        return WEIGHTS["collection_system_pop_medium"], f"Serves {n:,} people"
+    if n >= WEIGHTS["collection_system_pop_small_threshold"]:
+        return WEIGHTS["collection_system_pop_small"], f"Serves {n:,} people"
+    return None
 
 
 def rule_population_served(f: dict):
@@ -454,6 +600,9 @@ RULES: list[Rule] = [
     rule_discharges_to_impaired,
     rule_recent_dmr_exceedance,
     rule_exceeds_treatable_parameter,
+    rule_recent_sewer_overflow,
+    rule_combined_sewer_system,
+    rule_collection_system_population,
     rule_population_served,
 ]
 
@@ -581,15 +730,30 @@ def compute_tags(facility: dict, events: list[dict] | None = None) -> dict:
                      for c in PERMIT_HAS_COLS if facility.get(c)}
     tag_exceeds_treatable = bool(exceeded_set & permitted_set)
 
-    # Composite — "if a rep had one filter, this is it". The pre-
-    # violation signals (treatable_permit, param_match) AND the
-    # active-compliance signal (exceeds_treatable) all OR-include on
-    # the positive side. Resolved-only events still demote to False
-    # to preserve the do-not-call guardrail.
+    # Sewer overflow / bypass + collection-system tags. Bulk-only; cleanly
+    # False on API-path leads and on CWA leads in states not yet reporting
+    # under the eRule. `tag_recent_sso` matches by substring on the
+    # pipe-joined types text — same convention as the streamer's storage
+    # shape ("CSO | SSO").
+    sewer_count = _safe_int(facility.get("recent_sewer_overflow_count"))
+    sewer_types = str(facility.get("recent_sewer_overflow_types") or "").upper()
+    tag_recent_sewer_overflow = sewer_count > 0
+    tag_recent_sso = "SSO" in sewer_types
+    tag_dry_weather_overflow = bool(facility.get("has_dry_weather_overflow"))
+    tag_combined_sewer_system = bool(facility.get("has_combined_sewer_system"))
+
+    # Composite — "if a rep had one filter, this is it". OR-includes the
+    # pre-violation signals (treatable_permit, param_match), the active-
+    # compliance signals (exceeds_treatable, recent_sewer_overflow), and
+    # the event-driven categories. tag_combined_sewer_system intentionally
+    # NOT included — CSS is too common (267+ permits) to keep the composite
+    # at the "pare 7K rows to 50" goal; it earns its keep as a standalone
+    # filter chip instead. The do-not-call guardrail (only-resolved events)
+    # still demotes to False.
     tag_high_rel = (
         (tag_active_snc or tag_tt or tag_mcl or tag_lc
          or tag_treatable_permit or tag_param_match
-         or tag_exceeds_treatable)
+         or tag_exceeds_treatable or tag_recent_sewer_overflow)
         and not tag_only_resolved
     )
 
@@ -605,6 +769,10 @@ def compute_tags(facility: dict, events: list[dict] | None = None) -> dict:
         "tag_impairment_parameter_match": tag_param_match,
         "tag_recent_exceedance": tag_recent_exc,
         "tag_exceeds_treatable_parameter": tag_exceeds_treatable,
+        "tag_recent_sewer_overflow": tag_recent_sewer_overflow,
+        "tag_recent_sso": tag_recent_sso,
+        "tag_dry_weather_overflow": tag_dry_weather_overflow,
+        "tag_combined_sewer_system": tag_combined_sewer_system,
         "tag_chemtreat_high_relevance": tag_high_rel,
     }
 

@@ -28,20 +28,21 @@ deletes rows, so paths layer additively.
 
 ---
 
-## What `bulk_loader` does internally — one command, eight stages
+## What `bulk_loader` does internally — one command, nine stages
 
 ```mermaid
 flowchart TD
-    A[1. Scan ECHO Exporter<br/>→ facility inventory + initial score] --> B[2. Stream NPDES permit limits<br/>→ permit_has_* signals on CWA leads]
+    A[1. Scan ECHO Exporter<br/>→ facility inventory + initial score<br/>TARGET_NAICS includes 22132 POTWs since 2026-06-16] --> B[2. Stream NPDES permit limits<br/>→ permit_has_* signals on CWA leads]
     B --> C[3. Stream NPDES↔ATTAINS linkage<br/>→ impaired-water signals on all leads]
     C --> D[4. Stream DMR archive<br/>→ exceedance signals + per-DMR events on CWA leads]
-    D --> E[5. Re-score with new signals<br/>BEFORE drill-down candidate selection]
-    E --> F[6. Stream NPDES + SDWA event zips<br/>→ join to leads]
-    F --> G[7. API fine-comb<br/>on high-value / newly-discovered / score-jumped leads<br/>auto short-circuits on 20-streak HTTP 429]
-    G --> H[8. Upsert SQLite<br/>→ dump CSVs to per-run folder]
+    D --> SO[5. Stream sewer-overflow events<br/>+ collection-system permits + CSO inventory<br/>→ sewer/CSS signals + per-event rows on CWA leads<br/>daily-refresh feed; cache window 1d]
+    SO --> E[6. Re-score with new signals<br/>BEFORE drill-down candidate selection]
+    E --> F[7. Stream NPDES + SDWA event zips<br/>→ join to leads]
+    F --> G[8. API fine-comb<br/>on high-value / newly-discovered / score-jumped leads<br/>auto short-circuits on 20-streak HTTP 429]
+    G --> H[9. Upsert SQLite<br/>→ inline artifacts to per-run folder<br/>run_health.json also mirrored into runs.run_health_json]
 ```
 
-`bulk_loader` (no flags) runs **all eight stages in one process**, ~10-30 min
+`bulk_loader` (no flags) runs **all nine stages in one process**, ~10-30 min
 total (warm cache). You don't need to issue each stage separately. `--no-events`
 stops after stage 1 — every download and signal-stream stage past it is gated
 on `include_events` and pinned by `tests/test_no_events_flag.py`.
@@ -94,13 +95,16 @@ files capture the moment-in-time state nobody else can rebuild, and
 the materialized files are pure DB views on demand.
 
 **Upload to the viewer**: materialize the run you want, then pick
-`all_leads.csv` and `violation_events.csv` from the materialized
-folder plus `run_health.json` from the original run folder. The first
-two populate the Inventory tab; the JSON populates the Run Health tab
-with coverage gaps, depth gaps, run warnings, and suggested follow-up
-commands. (The viewer shows one run at a time — to compare a
-nationwide run with a targeted run, materialize each separately and
-upload one, then the other.)
+`all_leads.csv`, `violation_events.csv`, AND `run_health.json` all
+from the materialized folder. The first two populate the Inventory
+tab; the JSON populates the Run Health tab with coverage gaps, depth
+gaps, run warnings, and suggested follow-up commands. (`dump_run`
+mirrors `run_health.json` out of `runs.run_health_json` since
+2026-06-16; for legacy runs that pre-date that schema change, the
+JSON still has to come from `out/<run-folder>/` and `dump_run`'s CLI
+tells you so when it skips.) The viewer shows one run at a time — to
+compare a nationwide run with a targeted run, materialize each
+separately and upload one, then the other.
 
 On a first run from an empty DB, `new_facilities.csv` is essentially a
 copy of `all_leads.csv` (everything is new). On a later run, it holds

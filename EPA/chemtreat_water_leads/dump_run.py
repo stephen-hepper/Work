@@ -143,6 +143,21 @@ def materialize_run(conn: sqlite3.Connection, run_id: int, out_dir: Path) -> dic
     counts["new_violations.csv"] = _write_dump(
         out_dir / "new_violations.csv", cols_v, new_viol)
 
+    # run_health.json — mirrored into runs.run_health_json by
+    # bulk_loader / pipeline at end of run (since 2026-06-16). Lets
+    # users upload one folder to the viewer instead of grabbing the
+    # JSON from out/<run-folder> separately. Legacy runs that pre-date
+    # the column have NULL; skip cleanly with a log so the user knows
+    # they'll need the original run folder for that one file.
+    health_json = snapshot.get_run_health(conn, run_id)
+    if health_json is not None:
+        (out_dir / "run_health.json").write_text(health_json, encoding="utf-8")
+        counts["run_health.json"] = 1
+    else:
+        log.info("run %d pre-dates run_health_json column; the file is "
+                 "still available in the original out/<run-folder>/",
+                 run_id)
+
     return counts
 
 
@@ -217,10 +232,20 @@ def _cli() -> None:
 
     print(f"Materialized run {run_id} into {out_dir}/")
     for name, n in counts.items():
-        print(f"  {name:25} {n:>8} rows")
+        # run_health.json is a single doc, not a row count — show
+        # "(present)" instead of "1 rows".
+        suffix = "(present)" if name == "run_health.json" else f"{n:>8} rows"
+        print(f"  {name:25} {suffix}")
     print()
-    print("Upload all_leads.csv, violation_events.csv (and run_health.json from "
-          "the original run folder) to the viewer.")
+    has_health = (out_dir / "run_health.json").exists()
+    if has_health:
+        print("Upload all_leads.csv, violation_events.csv, and run_health.json "
+              "to the viewer — all from this folder.")
+    else:
+        print("Upload all_leads.csv and violation_events.csv to the viewer. "
+              "This run pre-dates the run_health.json mirroring — grab the "
+              "JSON from the original out/<run-folder>/ if you want the "
+              "Run Health tab.")
 
 
 if __name__ == "__main__":

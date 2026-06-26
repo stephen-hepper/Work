@@ -157,6 +157,38 @@ FAC_COLUMNS: dict[str, str] = {
     "tag_impairment_parameter_match": "INTEGER",
     "tag_recent_exceedance":      "INTEGER",
     "tag_exceeds_treatable_parameter": "INTEGER",
+    # Sewer Overflow / Bypass event signals (current_sewer_overflow_
+    # and_collection_systems_tables.zip, daily refresh). CWA/POTW-only —
+    # bulk-only. Empty on SDWA leads and on CWA leads in states not yet
+    # reporting under the 2025-03 NPDES eRule Phase 2 rollout. A facility
+    # with all-zero values is not "no overflow problem" — it's "we don't
+    # know"; the data_lag_note on every emitted event row carries that
+    # caveat into the briefings/viewer paths.
+    "recent_sewer_overflow_count":      "INTEGER",
+    "recent_sewer_overflow_volume_gal": "REAL",
+    "most_recent_sewer_overflow_at":    "TEXT",
+    "recent_sewer_overflow_types":      "TEXT",
+    # 1 if ANY event in window has wet_weather_occurance_indicator='N'.
+    # Dry-weather overflow ≈ treatment failure (vs. wet-weather CSO
+    # which is often permitted design behavior at older POTWs), so the
+    # tier ladder leans on this distinction.
+    "has_dry_weather_overflow":         "INTEGER",
+    # Collection-system enrollment (collection_system_permits.csv in
+    # the events zip + ALL_CSO_downloads.zip). Static. Populated for
+    # 4,036 permits in the events-zip data as of 2026-06-15 — broader
+    # than the 608 reporting actual events. Population is a CWA-side
+    # revenue proxy mirroring SDWA's PopulationServedCount.
+    "percent_collection_system_css":    "INTEGER",
+    "collection_system_population":     "INTEGER",
+    # has_combined_sewer_system is OR'd across both feeds:
+    #   * percent_collection_system_css > 0 (from the eRule data), OR
+    #   * the permit appears in ALL_CSO_downloads.csv (for the 649
+    #     CSO-system permits the eRule hasn't onboarded yet).
+    "has_combined_sewer_system":        "INTEGER",
+    "tag_recent_sewer_overflow":        "INTEGER",
+    "tag_recent_sso":                   "INTEGER",
+    "tag_dry_weather_overflow":         "INTEGER",
+    "tag_combined_sewer_system":        "INTEGER",
     # Drill-down state — per-row operational columns that drive
     # hands-off rerun decisioning. Pipeline writes these from
     # `_drill_cwa` / `_drill_sdwa` via `_record_drilldown_outcome`.
@@ -279,9 +311,16 @@ def _create_sql() -> str:
     CREATE INDEX IF NOT EXISTS idx_violations_lastseen ON violations(last_seen);
 
     CREATE TABLE IF NOT EXISTS runs (
-        run_id     INTEGER PRIMARY KEY AUTOINCREMENT,
-        run_at     TEXT,
-        notes      TEXT
+        run_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_at            TEXT,
+        notes             TEXT,
+        -- Mirror of out/<run-folder>/run_health.json so dump_run can
+        -- materialize the file alongside all_leads.csv and the rest —
+        -- single uploadable folder for the viewer. Populated by both
+        -- bulk_loader.run_bulk and pipeline.run after write_run_health.
+        -- NULL on runs that pre-date the 2026-06-16 schema change;
+        -- dump_run handles that case gracefully.
+        run_health_json   TEXT
     );
 
     -- Per-row run membership. Records every (run_id, row-key) the upsert
@@ -323,6 +362,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         for col, decl in wanted.items():
             if col not in have:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    # `runs` schema grown 2026-06-16 to mirror run_health.json into the
+    # DB. Inlined rather than added to the dict-driven loop above because
+    # the table's PRIMARY KEY AUTOINCREMENT on run_id doesn't fit the
+    # FAC/VIOL_COLUMNS shape (those dicts list ALTER-eligible columns,
+    # and you can't ALTER TABLE ADD COLUMN with PRIMARY KEY).
+    runs_have = {r["name"] for r in conn.execute("PRAGMA table_info(runs)")}
+    if "run_health_json" not in runs_have:
+        conn.execute("ALTER TABLE runs ADD COLUMN run_health_json TEXT")
 
 
 @contextmanager
@@ -572,6 +619,33 @@ def record_run(conn: sqlite3.Connection,
         (now or _now_iso(), notes),
     )
     return cur.lastrowid
+
+
+def set_run_health(conn: sqlite3.Connection,
+                   run_id: int,
+                   run_health_json: str) -> None:
+    """Mirror the run_health.json contents into `runs.run_health_json`
+    so `dump_run` can materialize it alongside the CSVs. Idempotent —
+    can be called multiple times on the same run_id (last write wins).
+    Called by both bulk_loader.run_bulk and pipeline.run after
+    `_health.write_run_health` writes the on-disk copy."""
+    conn.execute(
+        "UPDATE runs SET run_health_json = ? WHERE run_id = ?",
+        (run_health_json, run_id),
+    )
+
+
+def get_run_health(conn: sqlite3.Connection, run_id: int) -> str | None:
+    """Return the JSON text mirrored into `runs.run_health_json`, or
+    None when absent (legacy runs that pre-date the 2026-06-16 schema
+    change, or runs killed before write_run_health fired)."""
+    row = conn.execute(
+        "SELECT run_health_json FROM runs WHERE run_id = ?",
+        (run_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return row["run_health_json"]
 
 
 # ----------------------------------------------------- CSV dumps

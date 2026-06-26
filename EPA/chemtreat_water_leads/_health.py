@@ -162,8 +162,14 @@ def write_run_health(out_dir: Path, *,
                      drilldown_stats: dict | None,
                      warnings: list[dict],
                      event_drilldown_min_score: int,
-                     secondary_drilldown_min_score: int) -> Path:
-    """Write `out/run_health.json` and return the path.
+                     secondary_drilldown_min_score: int) -> tuple[Path, str]:
+    """Write `out/run_health.json` and return ``(path, json_text)``.
+
+    The JSON text is returned alongside the path so callers can mirror
+    it into the runs table via `snapshot.set_run_health` without
+    re-reading the file. `dump_run` then materializes it back into
+    `materialized/run_<N>/run_health.json` on demand — single uploadable
+    folder for the viewer.
 
     Schema version is `SCHEMA_VERSION` (currently 2). Bump it if keys
     change; the viewer's `renderHealth()` refuses to render unknown
@@ -211,5 +217,6 @@ def write_run_health(out_dir: Path, *,
         ),
     }
     path = out_dir / "run_health.json"
-    path.write_text(json.dumps(health, indent=2, default=str))
-    return path
+    json_text = json.dumps(health, indent=2, default=str)
+    path.write_text(json_text)
+    return path, json_text

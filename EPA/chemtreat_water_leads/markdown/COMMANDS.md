@@ -114,21 +114,26 @@ python -m chemtreat_water_leads.bulk_loader \
     --cache ./cache
 ```
 
-This downloads three EPA bulk files (cached for 7 days, matching EPA's
-weekly refresh cadence), stream-filters them, and produces the same
-output shape as the API pipeline.
+This downloads eight EPA bulk files (cached per-feed: 7 days for the
+weekly-refresh feeds, 1 day for the daily-refresh sewer-overflow events
+feed). Streamers filter them, and the run produces the same output
+shape as the API pipeline.
 
 **First run:** **~10–20 min total.**
 
-- Download `echo_exporter.zip` (~250 MB): 1–5 min depending on connection
+- Download `echo_exporter.zip` (~423 MB): 1–5 min depending on connection
 - Stream-filter 1.5M facility rows: 1–3 min
-- Download `npdes_downloads.zip` (~80 MB): 30s–2 min
+- Download `npdes_limits.zip` (~490 MB) + `npdes_attains_downloads.zip` (~99 MB) + `npdes_dmrs_fy<YEAR>.zip` (~344 MB): 2–5 min
+- Stream-filter pre-violation + DMR signals: 1–3 min
+- Download `current_sewer_overflow_and_collection_systems_tables.zip` (~1 MB, **daily**) + `ALL_CSO_downloads.zip` (~300 KB): seconds
+- Download `npdes_downloads.zip` (~327 MB): 30s–2 min
 - Read NPDES violation events: 1–3 min
-- Download `SDWA_latest_downloads.zip` (~40 MB): 15s–1 min
+- Download `SDWA_latest_downloads.zip` (~499 MB): 15s–1 min
 - Read SDWA violation events: <1 min
 
-**Later runs (within 7 days):** **~3–10 min.** Zips are cached and
-re-used. Only the parse/filter/diff work runs.
+**Later runs (within 7 days):** **~3–10 min.** Most zips are cached
+and re-used. The sewer-overflow events feed re-downloads daily; the
+rest weekly. Only the parse/filter/diff work runs on cache hits.
 
 **Later runs (after 7 days):** back to first-run timing because the
 cache invalidates.
@@ -388,10 +393,13 @@ The HTML viewer in `../chemtreat_water_leads_viewer/index.html` reads
 these columns directly — first materialize the run you want with
 `dump_run --latest --out <dir>`, then open the viewer in a browser and
 use the Upload CSV button to load `all_leads.csv`,
-`violation_events.csv`, and the original run folder's `run_health.json`.
-The viewer shows one run at a time; to compare a nationwide run against
-a targeted one, materialize each into a separate folder and upload each
-in turn.
+`violation_events.csv`, and `run_health.json` — all from the same
+materialized folder (since 2026-06-16 `dump_run` mirrors `run_health.json`
+out of `runs.run_health_json`; runs that pre-date that schema change
+still need the JSON grabbed from `out/<run-folder>/` separately, and
+`dump_run`'s CLI tells you so when it skips). The viewer shows one run
+at a time; to compare a nationwide run against a targeted one,
+materialize each into a separate folder and upload each in turn.
 
 ---
 

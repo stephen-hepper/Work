@@ -118,8 +118,10 @@ class TestPermitAttainsIntegration(unittest.TestCase):
 
         # Route _download_cached to our four fixture paths. Anything
         # else is a wiring bug — fail loudly instead of producing a
-        # silent empty result.
-        def fake_download_cached(url, cache_dir_arg, name):
+        # silent empty result. `max_age_days` kwarg added when the
+        # sewer-overflow daily-refresh path landed; accept it for
+        # signature parity.
+        def fake_download_cached(url, cache_dir_arg, name, max_age_days=None):
             mapping = {
                 "echo_exporter": exporter_zip,
                 "npdes_limits": limits_zip,
@@ -127,20 +129,37 @@ class TestPermitAttainsIntegration(unittest.TestCase):
                 "dmr_fy2026": dmr_zip,
                 # NPDES + SDWA event zips not needed — the streamer
                 # mocks below return [] without ever opening a file.
+                # Sewer overflow + CSO inventory: not part of THIS
+                # test's signal surface, so the dedicated streamers
+                # are stubbed below and we never actually open a zip
+                # for them. Returning a sentinel path keeps the
+                # wiring's try/except path happy without producing
+                # a real result.
             }
             if name in mapping:
                 return mapping[name]
+            if name in ("sewer_overflow", "cso_inventory"):
+                return cache_dir_arg / f"{name}.zip"  # never opened (mocks)
             raise AssertionError(
                 f"_download_cached called for unexpected feed: {name!r}")
 
         # Stub event streamers so we don't have to construct empty
         # event zips. _drill_* are also stubbed so no API path runs.
+        # CSO/SSO streamers also stubbed — this test is about the
+        # permit/ATTAINS/DMR signal path; sewer-overflow has its own
+        # dedicated integration test.
         with patch.object(bulk_loader, "_download_cached",
                           side_effect=fake_download_cached), \
              patch.object(bulk_loader, "stream_npdes_violations",
                           return_value=[]), \
              patch.object(bulk_loader, "stream_sdwa_violations",
                           return_value=[]), \
+             patch.object(bulk_loader, "stream_sewer_overflow_events",
+                          return_value=({}, [])), \
+             patch.object(bulk_loader, "stream_collection_system_permits",
+                          return_value={}), \
+             patch.object(bulk_loader, "stream_cso_inventory",
+                          return_value={}), \
              patch.object(bulk_loader, "_drill_cwa", return_value=0), \
              patch.object(bulk_loader, "_drill_sdwa", return_value=0):
             bulk_loader.run_bulk(

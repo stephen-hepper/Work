@@ -22,13 +22,17 @@ out.
 
 ## Where the CSVs come from
 
-`all_leads.csv` and `violation_events.csv` are materialized on demand
-from `../snapshot.sqlite` via
+`all_leads.csv`, `violation_events.csv`, and `run_health.json` are
+materialized on demand from `../snapshot.sqlite` via
 `python -m chemtreat_water_leads.dump_run --latest --out <dir>` (or
-`--run-id N`). The runs themselves no longer write these CSVs inline
-— only `run_health.json` and `newly_snc_*.csv` (irrecoverable
-artifacts) land in the per-run folder. See the parent project's
-RATIONALE.md "Per-run output folders" for the full reasoning.
+`--run-id N`). The runs themselves no longer write the CSVs inline
+— `run_health.json` is also mirrored into `runs.run_health_json` as
+of 2026-06-16 so `dump_run` can emit it alongside the CSVs (single
+viewer-uploadable folder). The on-disk copy under `out/<run-folder>/`
+is kept for ops use; only `newly_snc_*.csv` is irrecoverable from the
+DB after the run (needs the prior `snc_flag` value the upsert
+overwrites). See the parent project's RATIONALE.md "Per-run output
+folders" for the full reasoning.
 
 The DB is the single source of truth; the CSVs the viewer eats are
 viewer-shaped views of it, materialized on demand. Implications for

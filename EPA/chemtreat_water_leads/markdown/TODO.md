@@ -70,8 +70,10 @@ Tracked separately in `EXTERNAL_DATA_STATUS.md`. As of 2026-06:
 - [x] **Tier-1 #1: NPDES Permit Limits** — pre-violation signal, shipped.
 - [x] **Tier-1 #2: ATTAINS-NPDES catchment** — pre-violation signal, shipped.
 - [x] **Tier-1 #3: NPDES DMR archive** — active-compliance signal, shipped.
-- [ ] **Tier-1 #4: Sewer Overflow / CSO / SSO events** — daily refresh,
-  POTW lead signal. Not started.
+- [x] **Tier-1 #4: Sewer Overflow / CSO / SSO events** — daily refresh,
+  POTW lead signal. Shipped 2026-06-16 (events feed + collection-system
+  enrollment + National CSO Inventory + POTW NAICS widening). Plan in
+  `CSO_SSO_PLAN.md`; live hit rates in `EXTERNAL_DATA_STATUS.md`.
 - [ ] **Tier-1 #5: TRI Surface Water Releases** — annual chemical-specific
   pounds-per-year. Not started.
 - [ ] **Tier-2 #6: UCMR5 PFAS Occurrence** — needs sales confirmation that
@@ -100,5 +102,27 @@ Tracked separately in `EXTERNAL_DATA_STATUS.md`. As of 2026-06:
 
 - [ ] **Re-tier viewer color thresholds.** The pre-2026-06 outlier band was
   ≥110. The 2026-06-02 run had 220 leads ≥130, 998 ≥100, and a top of 187.
-  Consider bumping the outlier threshold to ≥150 so the star badge stays
-  rare and meaningful.
+  The 2026-06-16 post-CSO/SSO run had 2,996 leads ≥100, 306 ≥150, 0 ≥200
+  with top still at 187 — POTW NAICS widening expanded the inventory by
+  ~8.5K but didn't push the top score past the prior ceiling. Consider
+  bumping the outlier threshold to ≥150 so the star badge stays rare and
+  meaningful. (Score slider max already bumped 180 → 220 in `index.html`
+  on the cso-sso-integration branch as a holding pattern; the `scoreClass`
+  thresholds still need the actual re-baseline.)
+
+- [x] **Mirror `run_health.json` into the DB so `dump_run` can materialize
+  it (shipped 2026-06-16).** `runs.run_health_json TEXT` column added;
+  `bulk_loader.run_bulk` and `pipeline.run` now persist the JSON
+  alongside the on-disk file; `dump_run` writes it into
+  `materialized/run_<N>/run_health.json`. Single viewer-uploadable
+  folder; legacy pre-2026-06-16 runs skip cleanly with a log line
+  pointing back to `out/<run-folder>/`.
+
+- [x] **WET / limit-of-zero DMR sentinel display (shipped 2026-06-16).**
+  EPA's `EXCEEDENCE_PCT` is INT32_MAX on rows where the permit limit is
+  zero (chlorine residual at no-detect permits) or where the parameter
+  is a pass/fail biological assay (Whole Effluent Toxicity tests). The
+  bulk_loader display-clamps to 99,999% for storage; `rule_recent_dmr_
+  exceedance` now special-cases pct ≥ 99,999 and emits a parameter-aware
+  "pass/fail or limit-of-zero parameter failure" reason instead of the
+  misleading "99999% over limit". Tier weight unchanged at +15.

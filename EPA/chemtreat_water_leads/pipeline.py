@@ -34,10 +34,23 @@ from . import _health, echo_client, scoring, snapshot
 log = logging.getLogger("chemtreat")
 
 # Industries ChemTreat typically serves. Edit freely - this is a marketing
-# decision, not a technical one.
+# decision, not a technical one. Prefixes — EPA prefix-matches NAICS
+# codes server-side, so "325" catches 325110 (basic chemicals), 325199
+# (other organic chemicals), etc.
 TARGET_NAICS = [
     "2211", "311", "312", "322", "324", "325", "327",
     "331", "332", "336", "622", "2111", "212",
+    # Sewage Treatment Facilities (POTWs). Added 2026-06-16 alongside
+    # the sewer-overflow integration — the daily-cadence SSO/CSO/BYP
+    # feed targets this exact segment, and without 22132 in the filter
+    # POTW leads never enter the inventory. 22132 is intentionally
+    # narrower than its parent 2213 ("Water, Sewage and Other Systems")
+    # to avoid 22131 (Water Supply / Irrigation — comes through SDWA
+    # already) and 22133 (Steam supply — irrelevant). Watch the run
+    # log for the inventory-size delta after this first lands; POTWs
+    # are the biggest CWA permit class and may shift score
+    # distributions enough to warrant re-baselining viewer color tiers.
+    "22132",
 ]
 
 # We only drill into violation *events* for high-scoring facilities,
@@ -192,6 +205,13 @@ CWA_LAG_NOTE = (
     "CWA DMR lag ~30-45 days. Monthly Discharge Monitoring Reports are "
     "filed after the monitoring period closes. Very recent activity (last "
     "30 days) is incomplete."
+)
+
+SEWER_LAG_NOTE = (
+    "Sewer Overflow / Bypass event reporting began 2025-03 under the "
+    "NPDES eRule Phase 2. Coverage rolls on state-by-state as primacy "
+    "programs onboard; a facility with no events here may simply be in "
+    "a state that hasn't started reporting yet."
 )
 
 LAG_BANNER = """
@@ -764,7 +784,7 @@ def _run_inner(states: list[str], out_dir: Path, db_path: Path,
     today = datetime.utcnow().strftime("%Y%m%d")
     _write_csv(run_dir / f"newly_snc_{today}.csv", fac_diff["newly_snc"])
 
-    health_path = _health.write_run_health(
+    health_path, health_json = _health.write_run_health(
         run_dir,
         command="pipeline",
         states=states,
@@ -779,14 +799,21 @@ def _run_inner(states: list[str], out_dir: Path, db_path: Path,
         event_drilldown_min_score=EVENT_DRILLDOWN_MIN_SCORE,
         secondary_drilldown_min_score=EVENT_DRILLDOWN_MIN_SCORE,
     )
-    log.info("Wrote run health to %s", health_path)
+    # Mirror into the DB so dump_run can materialize it alongside the
+    # CSVs (single uploadable folder for the viewer). Same convention
+    # as bulk_loader.
+    with snapshot.open_db(db_path) as conn:
+        snapshot.set_run_health(conn, run_id, health_json)
+    log.info("Wrote run health to %s (mirrored into runs.run_health_json)",
+             health_path)
 
     log.info("Done. %d new facilities, %d newly SNC, %d new violation events.",
              len(fac_diff["new"]), len(fac_diff["newly_snc"]),
              len(viol_diff["new"]))
     log.info("Run %d outputs in %s (run_health.json, newly_snc_*.csv). "
-             "To materialize all_leads.csv + violation_events.csv for the "
-             "viewer, run:  python -m chemtreat_water_leads.dump_run "
+             "To materialize the viewer-uploadable folder (all_leads.csv, "
+             "violation_events.csv, run_health.json), run:  "
+             "python -m chemtreat_water_leads.dump_run "
              "--db %s --run-id %d --out ./materialized/run_%d",
              run_id, run_dir, db_path, run_id, run_id)
     print(LAG_BANNER)   # remind them again at the end

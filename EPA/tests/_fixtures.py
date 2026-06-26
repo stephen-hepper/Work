@@ -183,3 +183,103 @@ def make_dmr_zip(tmp_path: Path, rows: list[dict],
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
         _write_csv(zf, f"NPDES_DMRS_FY{fy}.csv", DMR_HEADER, rows)
     return path
+
+
+# Headers verified against the real current_sewer_overflow_and_
+# collection_systems_tables.zip, 2026-06-15 refresh. Lowercase snake
+# case (EPA's choice — different convention from the older CWA/SDWA
+# files which use SCREAMING_SNAKE). The streamer reads only a subset
+# of the 39-column events table; the fixture mirrors only what the
+# streamer touches plus the join key.
+SEWER_EVENTS_HEADER = [
+    "sewer_overflow_bypass_event_key",
+    "permit_identifier",
+    "sewer_overflow_bypass_start_datetime",
+    "sewer_overflow_bypass_end_datetime",
+    "sewer_overflow_bypass_discharge_volume_gallons",
+    "wet_weather_occurance_indicator",
+    "sewer_overflow_structure_type_desc",
+    "collection_system_population",
+]
+
+SEWER_TYPES_HEADER = [
+    "sewer_overflow_bypass_event_key",
+    "permit_identifier",
+    "sewer_overflow_bypass_type_code",
+    "sewer_overflow_bypass_type_desc",
+    "sewer_overflow_bypass_type_code_sequence",
+]
+
+# collection_system_permits.csv — one row per (permit, collection
+# system). Multi-system permits aggregate at streamer time.
+SEWER_PERMITS_HEADER = [
+    "permit_identifier",
+    "collection_system_identifier",
+    "collection_system_name",
+    "collection_system_owner_type_code",
+    "collection_system_owner_type_desc",
+    "collection_system_population",
+    "percent_collection_system_css",
+    "payload_id",
+    "received_date",
+    "transaction_type",
+]
+
+# ALL_CSO_DOWNLOADS.csv — one row per CSO outfall. 40 columns in the
+# real file; the streamer only reads NPDES_ID, so the fixture only
+# needs the join key plus enough placeholder columns for csv.DictReader.
+CSO_INVENTORY_HEADER = [
+    "NPDESID_PFID",
+    "NPDES_ID",
+    "PERMITTING_STATE",
+    "FACILITY_NAME",
+    "FACILITY_TYPE_INDICATOR",
+    "PERM_FEATURE_NMBR",
+    "PF_CHARACTER",
+]
+
+
+def make_sewer_overflow_zip(
+    tmp_path: Path,
+    events: list[dict],
+    types: list[dict],
+    permits: list[dict] | None = None,
+    name: str = "sewer_overflow.zip",
+) -> Path:
+    """Build a sewer-overflow zip mimicking the real EPA archive shape.
+
+    Three of the nine CSVs in the real archive are emitted (the ones
+    our streamers read); the others (causes, impacts, corrective_
+    actions, receiving_waters, treatment_codes, columns_metadata) plus
+    the ERD PDF are omitted.
+
+    Caller passes:
+      events:  rows for sewer_overflow_bypass_report_events.csv
+      types:   rows for sewer_overflow_bypass_types.csv
+      permits: rows for collection_system_permits.csv (optional —
+               defaults to empty so existing event-streamer tests work
+               unchanged)
+    """
+    path = tmp_path / name
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        _write_csv(zf, "sewer_overflow_bypass_report_events.csv",
+                   SEWER_EVENTS_HEADER, events)
+        _write_csv(zf, "sewer_overflow_bypass_types.csv",
+                   SEWER_TYPES_HEADER, types)
+        _write_csv(zf, "collection_system_permits.csv",
+                   SEWER_PERMITS_HEADER, permits or [])
+    return path
+
+
+def make_cso_inventory_zip(
+    tmp_path: Path,
+    rows: list[dict],
+    name: str = "cso_inventory.zip",
+) -> Path:
+    """Build ALL_CSO_DOWNLOADS.csv inside a zip mimicking the National
+    CSO Inventory archive (`ALL_CSO_downloads.zip`)."""
+    path = tmp_path / name
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        _write_csv(zf, "ALL_CSO_DOWNLOADS.csv",
+                   CSO_INVENTORY_HEADER, rows)
+    return path
